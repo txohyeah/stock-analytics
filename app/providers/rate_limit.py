@@ -45,8 +45,38 @@ class CrawlerGuard:
 
 
 def is_rate_limit_error(exc: Exception) -> bool:
-    message = str(exc).lower()
+    message = _error_chain_text(exc)
     return any(
         marker in message
         for marker in ("403", "429", "forbidden", "too many requests", "blocked", "banned", "rate limit", "频率", "限制")
     )
+
+
+def is_remote_disconnect_error(exc: Exception) -> bool:
+    message = _error_chain_text(exc)
+    return any(
+        marker in message
+        for marker in (
+            "remotedisconnected",
+            "remote end closed connection",
+            "connection aborted",
+            "connection reset",
+            "connection refused",
+            "max retries exceeded",
+            "proxyerror",
+        )
+    )
+
+
+def is_crawler_block_error(exc: Exception) -> bool:
+    return is_rate_limit_error(exc) or is_remote_disconnect_error(exc)
+
+
+def _error_chain_text(exc: Exception) -> str:
+    parts: list[str] = []
+    current: BaseException | None = exc
+    while current is not None:
+        parts.append(type(current).__name__)
+        parts.append(str(current))
+        current = current.__cause__ or current.__context__
+    return " ".join(parts).lower()

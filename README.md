@@ -112,9 +112,13 @@ CRAWLER_SLEEP_MAX_SECONDS=3.0
 CRAWLER_MAX_RETRIES=3
 CRAWLER_COOLDOWN_SECONDS=300
 CRAWLER_TIMEOUT_SECONDS=20
+# 可选：代理。CRAWLER_PROXY_URL 会同时用于 HTTP 和 HTTPS。
+# CRAWLER_PROXY_URL=http://user:password@proxy_host:proxy_port
+# CRAWLER_HTTP_PROXY=http://user:password@proxy_host:proxy_port
+# CRAWLER_HTTPS_PROXY=http://user:password@proxy_host:proxy_port
 ```
 
-备用抓取源内置随机 User-Agent、随机请求间隔、指数退避和冷却机制。批量同步时仍按 DataFrame 批量写库，不逐行写入。
+备用抓取源内置随机 User-Agent、随机请求间隔、指数退避和冷却机制。若东方财富返回 403/429，或持续出现远端断开连接，会进入冷却期，避免继续高频打同一个出口。批量同步时仍按 DataFrame 批量写库，不逐行写入。
 
 ## 大模型按需补库
 

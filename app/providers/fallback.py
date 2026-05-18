@@ -4,12 +4,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 import logging
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import pandas as pd
 import requests
 
 from app.config import Settings
-from app.providers.rate_limit import CrawlerGuard, is_rate_limit_error
+from app.providers.rate_limit import CrawlerGuard, is_crawler_block_error, is_rate_limit_error
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,10 @@ class FallbackProvider:
             max_retries=settings.crawler_max_retries,
             cooldown_seconds=settings.crawler_cooldown_seconds,
         )
+        self.session = requests.Session()
+        self.proxies = build_proxy_config(settings)
+        if self.proxies:
+            logger.info("Eastmoney fallback proxy enabled: %s", redact_proxy_url(next(iter(self.proxies.values()))))
 
     def fetch_trade_cal(self, start_date: str, end_date: str, reason: str) -> FallbackResult:
         frame = _build_trade_calendar(start_date, end_date)
@@ -59,7 +64,7 @@ class FallbackProvider:
             try:
                 frame = self._fetch_eastmoney_kline(code, trade_date, trade_date)
             except Exception as exc:  # noqa: BLE001 - fallback should keep the sync loop resilient
-                if is_rate_limit_error(exc):
+                if is_crawler_block_error(exc):
                     self.guard.mark_rate_limited(str(exc))
                     break
                 logger.warning("Eastmoney %s fallback failed code=%s date=%s: %s", dataset, code, trade_date, exc)
@@ -77,7 +82,7 @@ class FallbackProvider:
         for attempt in range(1, self.settings.crawler_max_retries + 1):
             try:
                 headers = self.guard.before_request()
-                response = requests.get(
+                response = self.session.get(
                     "https://push2his.eastmoney.com/api/qt/stock/kline/get",
                     params={
                         "secid": secid,
@@ -89,6 +94,7 @@ class FallbackProvider:
                         "end": end_date,
                     },
                     headers=headers,
+                    proxies=self.proxies or None,
                     timeout=self.settings.crawler_timeout_seconds,
                 )
                 response.raise_for_status()
@@ -113,7 +119,31 @@ class FallbackProvider:
                     import time
 
                     time.sleep(time_to_sleep)
+        if last_error and is_crawler_block_error(last_error):
+            raise RuntimeError(f"Eastmoney kline blocked or disconnected for {ts_code}") from last_error
         raise RuntimeError(f"Eastmoney kline failed for {ts_code}") from last_error
+
+
+def build_proxy_config(settings: Settings) -> dict[str, str]:
+    if settings.crawler_proxy_url:
+        return {"http": settings.crawler_proxy_url, "https": settings.crawler_proxy_url}
+
+    proxies: dict[str, str] = {}
+    if settings.crawler_http_proxy:
+        proxies["http"] = settings.crawler_http_proxy
+    if settings.crawler_https_proxy:
+        proxies["https"] = settings.crawler_https_proxy
+    return proxies
+
+
+def redact_proxy_url(proxy_url: str) -> str:
+    parsed = urlsplit(proxy_url)
+    if not parsed.username:
+        return proxy_url
+    host = parsed.hostname or ""
+    if parsed.port:
+        host = f"{host}:{parsed.port}"
+    return urlunsplit((parsed.scheme, f"***:***@{host}", parsed.path, parsed.query, parsed.fragment))
 
 
 def _build_trade_calendar(start_date: str, end_date: str) -> pd.DataFrame:

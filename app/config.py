@@ -66,6 +66,9 @@ class Settings:
     crawler_max_retries: int
     crawler_cooldown_seconds: float
     crawler_timeout_seconds: float
+    crawler_proxy_url: str
+    crawler_http_proxy: str
+    crawler_https_proxy: str
 
     @property
     def mysql_url(self) -> str:
@@ -97,4 +100,7 @@ def get_settings() -> Settings:
         crawler_max_retries=_int_env("CRAWLER_MAX_RETRIES", 3),
         crawler_cooldown_seconds=_float_env("CRAWLER_COOLDOWN_SECONDS", 300),
         crawler_timeout_seconds=_float_env("CRAWLER_TIMEOUT_SECONDS", 20),
+        crawler_proxy_url=os.getenv("CRAWLER_PROXY_URL", ""),
+        crawler_http_proxy=os.getenv("CRAWLER_HTTP_PROXY", ""),
+        crawler_https_proxy=os.getenv("CRAWLER_HTTPS_PROXY", ""),
     )
