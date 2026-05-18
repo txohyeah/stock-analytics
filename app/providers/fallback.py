@@ -104,7 +104,7 @@ class FallbackProvider:
                 return parse_eastmoney_klines(ts_code, klines)
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
-                if is_rate_limit_error(exc):
+                if is_rate_limit_error(exc) or is_crawler_block_error(exc):
                     raise
                 if attempt < self.settings.crawler_max_retries:
                     time_to_sleep = min(2 ** attempt, 8)

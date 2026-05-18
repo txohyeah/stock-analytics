@@ -63,6 +63,8 @@ def is_remote_disconnect_error(exc: Exception) -> bool:
             "connection reset",
             "connection refused",
             "max retries exceeded",
+            "permissionerror",
+            "winerror 10013",
             "proxyerror",
         )
     )
