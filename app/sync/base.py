@@ -318,9 +318,15 @@ def run_dataset(ctx: SyncContext, dataset: Dataset, start_date: str, end_date: s
     return fetched, affected
 
 
-def run_many(ctx: SyncContext, datasets: Iterable[Dataset], start_date: str, end_date: str, mode: str, ts_code: str | None = None) -> dict[str, tuple[int, int]]:
-    results = {}
+def run_many(ctx: SyncContext, datasets: Iterable[Dataset], start_date: str, end_date: str, mode: str, ts_code: str | None = None) -> tuple[dict[str, tuple[int, int]], list[str]]:
+    """Run a group of datasets, collecting failures without aborting the group."""
+    results: dict[str, tuple[int, int]] = {}
+    failures: list[str] = []
     for dataset in datasets:
-        fetched, affected = run_dataset(ctx, dataset, start_date, end_date, mode, ts_code)
-        results[dataset.name] = (fetched, affected)
-    return results
+        try:
+            fetched, affected = run_dataset(ctx, dataset, start_date, end_date, mode, ts_code)
+            results[dataset.name] = (fetched, affected)
+        except Exception as exc:  # noqa: BLE001 - fail-soft per dataset
+            logger.error("%s failed: %s", dataset.name, exc)
+            failures.append(f"{dataset.name}: {exc}")
+    return results, failures

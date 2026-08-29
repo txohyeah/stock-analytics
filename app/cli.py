@@ -117,12 +117,18 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
     try:
         if group_names or args.dataset == "all":
-            results = run_many(ctx, datasets, start, end, mode, args.ts_code)
+            results, failures = run_many(ctx, datasets, start, end, mode, args.ts_code)
+            for name, (fetched, affected) in results.items():
+                print(f"{name}: fetched={fetched}, affected={affected}")
+            if failures:
+                summary = "; ".join(failures)
+                logger.error("group failed datasets: %s", summary)
+                send_text(ctx.settings, f"[tushare-sync] {args.dataset} 部分数据集失败: {summary}")
         else:
             dataset = datasets[0]
             results = {dataset.name: run_dataset(ctx, dataset, start, end, mode, args.ts_code)}
-        for name, (fetched, affected) in results.items():
-            print(f"{name}: fetched={fetched}, affected={affected}")
+            for name, (fetched, affected) in results.items():
+                print(f"{name}: fetched={fetched}, affected={affected}")
         ctx.store.close()
         return 0
     except Exception as exc:  # noqa: BLE001 - full group failure
