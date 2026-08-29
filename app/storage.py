@@ -108,9 +108,13 @@ class RowStore:
             return 0
         unique_set = set(unique_columns)
         update_cols = [c for c in columns if c not in unique_set]
+        # Keep per-statement variable count under safe limits (sqlite/mysql both
+        # cap placeholders; adapt sub-batch size to the column count).
+        per_exec = max(800 // len(columns), 1)
+        step = max(min(batch_size, per_exec), 1)
         affected = 0
-        for i in range(0, len(rows), batch_size):
-            chunk = rows[i : i + batch_size]
+        for i in range(0, len(rows), step):
+            chunk = rows[i : i + step]
             affected += self._upsert_chunk(table, columns, chunk, unique_columns, update_cols)
         self.commit()
         return affected
@@ -200,11 +204,7 @@ class SqliteStore(RowStore):
     ) -> int:
         col_list = ",".join(_quote_ident(self.driver, c) for c in columns)
         placeholders = ",".join("?" for _ in columns)
-        value_sql = ",".join(f"({placeholders})" for _ in chunk)
-        params: list[Any] = []
-        for row in chunk:
-            params.extend(row)
-        sql = f"INSERT INTO {_quote_ident(self.driver, table)} ({col_list}) VALUES {value_sql}"
+        sql = f"INSERT INTO {_quote_ident(self.driver, table)} ({col_list}) VALUES ({placeholders})"
         if update_cols:
             uniq = ",".join(_quote_ident(self.driver, c) for c in unique_columns)
             setters = ",".join(
@@ -212,8 +212,9 @@ class SqliteStore(RowStore):
                 for c in update_cols
             )
             sql += f" ON CONFLICT ({uniq}) DO UPDATE SET {setters}"
-        cur = self.execute(sql, params)
-        return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        cur = self._conn.executemany(sql, [list(r) for r in chunk])
+        rc = cur.rowcount
+        return rc if rc and rc > 0 else 0
 
 
 class MysqlStore(RowStore):
@@ -287,20 +288,16 @@ class MysqlStore(RowStore):
         update_cols: Sequence[str],
     ) -> int:
         col_list = ",".join(_quote_ident(self.driver, c) for c in columns)
-        value_sql = ",".join(
-            "(" + ",".join(["%s"] * len(columns)) + ")" for _ in chunk
-        )
-        params: list[Any] = []
-        for row in chunk:
-            params.extend(row)
-        sql = f"INSERT INTO {_quote_ident(self.driver, table)} ({col_list}) VALUES {value_sql}"
+        placeholders = ",".join("%s" for _ in columns)
+        sql = f"INSERT INTO {_quote_ident(self.driver, table)} ({col_list}) VALUES ({placeholders})"
         if update_cols:
             setters = ",".join(
                 f"{_quote_ident(self.driver, c)} = VALUES({_quote_ident(self.driver, c)})"
                 for c in update_cols
             )
             sql += f" ON DUPLICATE KEY UPDATE {setters}"
-        cur = self.execute(sql, params)
+        cur = self._conn.cursor()
+        cur.executemany(sql, [list(r) for r in chunk])
         return cur.rowcount or 0
 
 
