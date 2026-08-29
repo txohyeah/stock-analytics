@@ -42,12 +42,18 @@ def _read_qwenpaw_feishu_config() -> dict[str, str]:
 
 
 def resolve_credentials(settings: Settings) -> tuple[str, str, str]:
-    """Return (app_id, app_secret, open_id); empty strings mean not configured."""
-    env = (settings.feishu_app_id, settings.feishu_app_secret, settings.feishu_open_id)
-    if any(env):
-        return env
-    cfg = _read_qwenpaw_feishu_config()
-    return cfg.get("app_id", ""), cfg.get("app_secret", ""), cfg.get("open_id", "")
+    """Return (app_id, app_secret, open_id); empty strings mean not configured.
+    Env vars win per-field, missing fields fall back to ~/.qwenpaw/config.json."""
+    env_id, env_secret, env_openid = (
+        settings.feishu_app_id,
+        settings.feishu_app_secret,
+        settings.feishu_open_id,
+    )
+    cfg = _read_qwenpaw_feishu_config() if not (env_id and env_secret) else {}
+    app_id = env_id or cfg.get("app_id", "")
+    app_secret = env_secret or cfg.get("app_secret", "")
+    open_id = env_openid or cfg.get("open_id", "")
+    return app_id, app_secret, open_id
 
 
 def _tenant_token(app_id: str, app_secret: str) -> str:
