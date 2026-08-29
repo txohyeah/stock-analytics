@@ -36,13 +36,24 @@ cp .env.example .env   # 填入 TUSHARE_TOKEN，按需选 DB_DRIVER
 ./venv/bin/python -m app.cli check-trade-day
 ```
 
-## 定时（crontab）
+## 定时与按需
 
-日 K 每个交易日约 19:00 后才有，行情组定在 20:10；财务公告晚间更新，定在 21:30。
+- **行情（market）**：每天 20:10 定时跑，非交易日自动跳过。日 K 等为高频数据，定时最省心。
+- **财务（finance）**：低频数据（季度披露），**不设定时**，由 LLM/分析按需调用 CLI 同步：
+  - 拉一批股票的三大报表/财务指标（股票池场景）：
+    ```bash
+    ./venv/bin/python -m app.cli sync income --ts-codes "600519.SH,000001.SZ" --start 20260101 --end 20260630
+    ./venv/bin/python -m app.cli sync fina_indicator --ts-codes "600519.SH,000001.SZ"
+    ```
+  - 历史全市场补数（慢，需挂机）：
+    ```bash
+    ./venv/bin/python -m app.cli sync finance --mode history   # 全市场逐股，约 2 小时/轮
+    ```
+
+crontab（已配置）：
 
 ```cron
 10 20 * * 1-5  /home/application/tushare_stock_data/run_sync.sh market
-30 21 * * *    /home/application/tushare_stock_data/run_sync.sh finance
 ```
 
 `run_sync.sh` 会写日志到 `logs/`（保留最近 30 份）。market 组内部先查 trade_cal，

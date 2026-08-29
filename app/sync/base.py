@@ -48,6 +48,9 @@ class SyncContext:
     settings: Settings
     fallback_provider: FallbackProvider | None = None
     enable_fallback: bool = True
+    # per-stock datasets (income/balancesheet/cashflow/fina_indicator):
+    # a batch of codes to sync; None means "whole universe from stock_basic".
+    ts_codes: list[str] | None = None
 
 
 def today_yyyymmdd() -> str:
@@ -253,9 +256,9 @@ def sync_by_trade_date(ctx: SyncContext, dataset: Dataset, start_date: str, end_
 
 
 def sync_by_stock(ctx: SyncContext, dataset: Dataset, start_date: str, end_date: str, ts_code: str | None) -> tuple[int, int]:
-    codes = [ts_code] if ts_code else read_stock_codes(ctx.store)
+    codes = ctx.ts_codes or ([ts_code] if ts_code else read_stock_codes(ctx.store))
     if not codes:
-        raise RuntimeError("No stock codes found. Run stock_basic sync first or pass --ts-code.")
+        raise RuntimeError("No stock codes found. Run stock_basic sync first or pass --ts-code/--ts-codes.")
 
     fetched = 0
     affected = 0

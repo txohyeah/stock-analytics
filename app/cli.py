@@ -77,6 +77,8 @@ def cmd_check_trade_day(args: argparse.Namespace | None = None) -> int:
 
 def cmd_sync(args: argparse.Namespace) -> int:
     ctx = build_context(None if args.fallback is None else args.fallback)
+    if args.ts_codes:
+        ctx.ts_codes = [c.strip() for c in args.ts_codes.split(",") if c.strip()]
     end = args.end or today_yyyymmdd()
     mode = args.mode or ("history" if args.history else "daily")
 
@@ -139,6 +141,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_sync.add_argument("--start", help="Start date YYYYMMDD.")
     p_sync.add_argument("--end", help="End date YYYYMMDD.")
     p_sync.add_argument("--ts-code", help="Single stock/index code.")
+    p_sync.add_argument("--ts-codes", help="Comma-separated stock codes, e.g. 600519.SH,000001.SZ (per-stock datasets).")
     p_sync.add_argument("--mode", choices=["daily", "history"], help="Run mode recorded in sync_run.")
     p_sync.add_argument("--history", action="store_true", help="Shorthand for --mode history.")
     p_sync.add_argument("--fallback", type=lambda v: v.lower() in ("1", "true", "yes"), default=None,
