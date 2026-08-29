@@ -1,3 +1,5 @@
+"""Sync primitives shared by all datasets: run bookkeeping, strategies and
+the common upsert path. Storage is backend-agnostic via RowStore."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6,12 +8,11 @@ import logging
 from typing import Callable, Iterable
 
 import pandas as pd
-from sqlalchemy import text
-from sqlalchemy.engine import Engine
 
 from app.config import Settings
 from app.db import read_stock_codes, read_trade_dates, upsert_dataframe
 from app.providers import FallbackProvider
+from app.storage import RowStore
 from app.tushare_client import TushareClient
 
 logger = logging.getLogger(__name__)
@@ -43,7 +44,7 @@ class Dataset:
 @dataclass
 class SyncContext:
     client: TushareClient
-    engine: Engine
+    store: RowStore
     settings: Settings
     fallback_provider: FallbackProvider | None = None
     enable_fallback: bool = True
@@ -68,8 +69,8 @@ def calendar_days(start_date: str, end_date: str) -> list[str]:
     return days
 
 
-def open_trade_days_or_calendar(engine: Engine, start_date: str, end_date: str) -> list[str]:
-    trade_dates = read_trade_dates(engine, start_date, end_date)
+def open_trade_days_or_calendar(store: RowStore, start_date: str, end_date: str) -> list[str]:
+    trade_dates = read_trade_dates(store, start_date, end_date)
     if trade_dates:
         return trade_dates
     return calendar_days(start_date, end_date)
@@ -92,67 +93,71 @@ def should_fallback(exc: Exception) -> bool:
     )
 
 
-def insert_sync_run(
-    engine: Engine,
-    dataset: str,
-    mode: str,
-    start_date: str,
-    end_date: str,
-) -> int:
-    sql = text(
-        """
-        INSERT INTO sync_run (dataset, mode, start_date, end_date, status)
-        VALUES (:dataset, :mode, :start_date, :end_date, 'running')
-        """
+def is_trade_day_today(store: RowStore, client: TushareClient, settings: Settings) -> bool | None:
+    """Return True if today is an open trade day, False otherwise, and None
+    when we cannot determine it (local trade_cal missing and remote query
+    failed). Used by the crontab entry to skip non-trading days."""
+    today = today_yyyymmdd()
+    try:
+        try:
+            known = read_trade_dates(store, today, today)
+            if known:
+                return True
+        except Exception:  # noqa: BLE001 - local calendar not synced yet
+            pass
+        # local calendar may not cover today yet -> query remote
+        frame = client.query("trade_cal", exchange="SSE", start_date=today, end_date=today)
+        if not frame.empty:
+            is_open = int(frame.iloc[0]["is_open"])
+            return bool(is_open)
+        return False
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("cannot determine trade day for %s: %s", today, exc)
+        return None
+
+
+def insert_sync_run(store: RowStore, dataset: str, mode: str, start_date: str, end_date: str) -> int:
+    store.execute(
+        "INSERT INTO sync_run (dataset, mode, start_date, end_date, status, started_at) "
+        "VALUES (%s, %s, %s, %s, %s, %s)" if store.driver == "mysql"
+        else "INSERT INTO sync_run (dataset, mode, start_date, end_date, status, started_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (dataset, mode, start_date, end_date, "running", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
     )
-    with engine.begin() as conn:
-        result = conn.execute(
-            sql,
-            {
-                "dataset": dataset,
-                "mode": mode,
-                "start_date": start_date,
-                "end_date": end_date,
-            },
-        )
-        return int(result.lastrowid)
+    store.commit()
+    run_id = store.lastrowid()
+    assert run_id is not None
+    return int(run_id)
 
 
 def finish_sync_run(
-    engine: Engine,
+    store: RowStore,
     run_id: int,
     status: str,
     fetched_rows: int,
     affected_rows: int,
     error_message: str | None = None,
 ) -> None:
-    sql = text(
-        """
-        UPDATE sync_run
-        SET status = :status,
-            finished_at = NOW(),
-            fetched_rows = :fetched_rows,
-            affected_rows = :affected_rows,
-            error_message = :error_message
-        WHERE id = :id
-        """
+    store.execute(
+        "UPDATE sync_run SET status = %s, finished_at = %s, fetched_rows = %s, "
+        "affected_rows = %s, error_message = %s WHERE id = %s" if store.driver == "mysql"
+        else "UPDATE sync_run SET status = ?, finished_at = ?, fetched_rows = ?, "
+        "affected_rows = ?, error_message = ? WHERE id = ?",
+        (
+            status,
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            fetched_rows,
+            affected_rows,
+            error_message,
+            run_id,
+        ),
     )
-    with engine.begin() as conn:
-        conn.execute(
-            sql,
-            {
-                "id": run_id,
-                "status": status,
-                "fetched_rows": fetched_rows,
-                "affected_rows": affected_rows,
-                "error_message": error_message,
-            },
-        )
+    store.commit()
 
 
 def upsert(ctx: SyncContext, dataset: Dataset, frame: pd.DataFrame) -> int:
     return upsert_dataframe(
-        ctx.engine,
+        ctx.store,
         dataset.table_name,
         frame,
         dataset.unique_columns,
@@ -191,14 +196,14 @@ def sync_by_trade_date(ctx: SyncContext, dataset: Dataset, start_date: str, end_
     if ts_code:
         params["ts_code"] = ts_code
     stock_codes: list[str] | None = None
-    for trade_date in open_trade_days_or_calendar(ctx.engine, start_date, end_date):
+    for trade_date in open_trade_days_or_calendar(ctx.store, start_date, end_date):
         try:
             frame = ctx.client.query(dataset.api_name, trade_date=trade_date, **params)
         except Exception as exc:
             if dataset.name not in ("daily", "index_daily") or not ctx.enable_fallback or ctx.fallback_provider is None or not should_fallback(exc):
                 raise
             if dataset.name == "daily" and stock_codes is None:
-                stock_codes = read_stock_codes(ctx.engine)
+                stock_codes = read_stock_codes(ctx.store)
             if dataset.name == "daily":
                 fallback = ctx.fallback_provider.fetch_daily_by_trade_date(
                     trade_date=trade_date,
@@ -220,7 +225,7 @@ def sync_by_trade_date(ctx: SyncContext, dataset: Dataset, start_date: str, end_
             continue
         if frame.empty and dataset.name in ("daily", "index_daily") and ctx.enable_fallback and ctx.fallback_provider is not None:
             if dataset.name == "daily" and stock_codes is None:
-                stock_codes = read_stock_codes(ctx.engine)
+                stock_codes = read_stock_codes(ctx.store)
             if dataset.name == "daily":
                 fallback = ctx.fallback_provider.fetch_daily_by_trade_date(
                     trade_date=trade_date,
@@ -248,7 +253,7 @@ def sync_by_trade_date(ctx: SyncContext, dataset: Dataset, start_date: str, end_
 
 
 def sync_by_stock(ctx: SyncContext, dataset: Dataset, start_date: str, end_date: str, ts_code: str | None) -> tuple[int, int]:
-    codes = [ts_code] if ts_code else read_stock_codes(ctx.engine)
+    codes = [ts_code] if ts_code else read_stock_codes(ctx.store)
     if not codes:
         raise RuntimeError("No stock codes found. Run stock_basic sync first or pass --ts-code.")
 
@@ -300,13 +305,13 @@ STRATEGIES: dict[str, SyncFunction] = {
 
 
 def run_dataset(ctx: SyncContext, dataset: Dataset, start_date: str, end_date: str, mode: str, ts_code: str | None = None) -> tuple[int, int]:
-    run_id = insert_sync_run(ctx.engine, dataset.name, mode, start_date, end_date)
+    run_id = insert_sync_run(ctx.store, dataset.name, mode, start_date, end_date)
     try:
         fetched, affected = STRATEGIES[dataset.strategy](ctx, dataset, start_date, end_date, ts_code)
     except Exception as exc:
-        finish_sync_run(ctx.engine, run_id, "failed", 0, 0, str(exc))
+        finish_sync_run(ctx.store, run_id, "failed", 0, 0, str(exc))
         raise
-    finish_sync_run(ctx.engine, run_id, "success", fetched, affected)
+    finish_sync_run(ctx.store, run_id, "success", fetched, affected)
     return fetched, affected
 
 

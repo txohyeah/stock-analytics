@@ -1,11 +1,21 @@
+"""Configuration for tushare stock sync.
+
+Reads .env file once at import time (same behaviour as before), then exposes
+a frozen Settings dataclass. Storage backend is selectable via DB_DRIVER:
+  - sqlite (default): zero-daemon single file, path DB_SQLITE_PATH
+  - mysql: uses MYSQL_* variables
+"""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import os
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+DEFAULT_DATA_DIR = ROOT_DIR / "data"
+DEFAULT_SQLITE_PATH = DEFAULT_DATA_DIR / "stock.db"
+DEFAULT_LOG_DIR = ROOT_DIR / "logs"
 
 
 def _load_dotenv(path: Path) -> None:
@@ -47,25 +57,36 @@ def _bool_env(name: str, default: bool) -> bool:
 
 @dataclass(frozen=True)
 class Settings:
+    # tushare
     tushare_token: str
-    mysql_host: str
-    mysql_port: int
-    mysql_user: str
-    mysql_password: str
-    mysql_database: str
-    mysql_charset: str
-    mysql_connect_timeout: int
-    sync_batch_size: int
-    sync_retry_times: int
-    sync_retry_backoff_seconds: float
-    sync_request_interval_seconds: float
-    sync_lookback_days: int
-    enable_fallback: bool
-    crawler_sleep_min_seconds: float
-    crawler_sleep_max_seconds: float
-    crawler_max_retries: int
-    crawler_cooldown_seconds: float
-    crawler_timeout_seconds: float
+    # storage backend: "sqlite" | "mysql"
+    db_driver: str = "sqlite"
+    db_sqlite_path: str = str(DEFAULT_SQLITE_PATH)
+    # mysql backend (used when db_driver == "mysql")
+    mysql_host: str = "localhost"
+    mysql_port: int = 3306
+    mysql_user: str = "root"
+    mysql_password: str = ""
+    mysql_database: str = "stock"
+    mysql_charset: str = "utf8mb4"
+    mysql_connect_timeout: int = 10
+    # sync behaviour
+    sync_batch_size: int = 5000
+    sync_retry_times: int = 3
+    sync_retry_backoff_seconds: float = 2
+    sync_request_interval_seconds: float = 0.35
+    sync_lookback_days: int = 5
+    finance_lookback_days: int = 30
+    enable_fallback: bool = True
+    crawler_sleep_min_seconds: float = 1.5
+    crawler_sleep_max_seconds: float = 3.0
+    crawler_max_retries: int = 3
+    crawler_cooldown_seconds: float = 300
+    crawler_timeout_seconds: float = 20
+    # feishu notification (optional; failures are logged anyway)
+    feishu_app_id: str = ""
+    feishu_app_secret: str = ""
+    feishu_open_id: str = ""
 
     @property
     def mysql_url(self) -> str:
@@ -79,6 +100,8 @@ class Settings:
 def get_settings() -> Settings:
     return Settings(
         tushare_token=os.getenv("TUSHARE_TOKEN", ""),
+        db_driver=os.getenv("DB_DRIVER", "sqlite"),
+        db_sqlite_path=os.getenv("DB_SQLITE_PATH", str(DEFAULT_SQLITE_PATH)),
         mysql_host=os.getenv("MYSQL_HOST", "localhost"),
         mysql_port=_int_env("MYSQL_PORT", 3306),
         mysql_user=os.getenv("MYSQL_USER", "root"),
@@ -91,10 +114,14 @@ def get_settings() -> Settings:
         sync_retry_backoff_seconds=_float_env("SYNC_RETRY_BACKOFF_SECONDS", 2),
         sync_request_interval_seconds=_float_env("SYNC_REQUEST_INTERVAL_SECONDS", 0.35),
         sync_lookback_days=_int_env("SYNC_LOOKBACK_DAYS", 5),
+        finance_lookback_days=_int_env("FINANCE_LOOKBACK_DAYS", 30),
         enable_fallback=_bool_env("ENABLE_FALLBACK", True),
         crawler_sleep_min_seconds=_float_env("CRAWLER_SLEEP_MIN_SECONDS", 1.5),
         crawler_sleep_max_seconds=_float_env("CRAWLER_SLEEP_MAX_SECONDS", 3.0),
         crawler_max_retries=_int_env("CRAWLER_MAX_RETRIES", 3),
         crawler_cooldown_seconds=_float_env("CRAWLER_COOLDOWN_SECONDS", 300),
         crawler_timeout_seconds=_float_env("CRAWLER_TIMEOUT_SECONDS", 20),
+        feishu_app_id=os.getenv("FEISHU_APP_ID", ""),
+        feishu_app_secret=os.getenv("FEISHU_APP_SECRET", ""),
+        feishu_open_id=os.getenv("FEISHU_OPEN_ID", ""),
     )
