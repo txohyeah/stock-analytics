@@ -87,14 +87,15 @@ crontab（已配置）：
 ./venv/bin/python -m app.cli market-review --date latest
 ./venv/bin/python -m app.cli market-period-review --period week
 ./venv/bin/python -m app.cli account-review --positions positions.csv
-./venv/bin/python -m app.cli baolei --self-test        # 或 --codes / --all --report out.md
+./venv/bin/python -m app.cli baolei --self-test        # 五雷区（零审计/一利润/二现金流/三商誉/四拐点）；或 --codes / --all --report out.md
+./venv/bin/python -m app.cli lhb                            # 龙虎榜超买/超卖信号（--trade-date YYYYMMDD 指定）
 ./venv/bin/python -m app.cli chart --code 600519.SH --output chart.png
 
 # 独立分析入口（等价，命令面相同）
 ./venv/bin/python -m app.analytics.cli query basic --code 600519.SH
 ```
 
-**数据缺口**：`fina_indicator` / `income` / `balancesheet` / `cashflow` 需按 ts_code 逐股同步，
+**数据缺口**：`fina_indicator` / `income` / `balancesheet` / `cashflow` / `fina_audit` 需按 ts_code 逐股同步（回填脚本 scripts/backfill_finance.sh + scripts/backfill_extras.sh），
 当前 sqlite 未全量入库。`query fina` 与 `baolei` 检测到未同步时返回
 `DATA_INSUFFICIENT` 并给出同步命令：
 
