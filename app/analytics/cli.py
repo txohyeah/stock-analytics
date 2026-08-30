@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 import sys
 import traceback
 from typing import Any, Callable
@@ -145,7 +146,7 @@ def _validate(args: argparse.Namespace) -> dict[str, object]:
 
 def _screen(args: argparse.Namespace) -> dict[str, object]:
     strategy = get_strategy(args.strategy)
-    return run_screen(
+    result = run_screen(
         strategy=strategy,
         input_path=args.input,
         codes_arg=args.codes,
@@ -162,7 +163,15 @@ def _screen(args: argparse.Namespace) -> dict[str, object]:
         run_record_path=args.run_record,
         min_circ_mv_e=args.min_circ_mv_e,
         max_price=args.max_price,
+        return_evaluations=bool(args.eval_json),
     )
+    if args.eval_json:
+        evaluations = result.pop("evaluations", [])
+        Path(args.eval_json).write_text(
+            json.dumps(evaluations, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+    return result
 
 
 def _market_review(args: argparse.Namespace) -> int:
@@ -290,6 +299,7 @@ def add_analytics_subparsers(sub) -> None:
     screen_parser.add_argument("--max-price", type=float)
     screen_parser.add_argument("--dry-run", action="store_true")
     screen_parser.add_argument("--run-record")
+    screen_parser.add_argument("--eval-json", help="将 StrategyEvaluation 明细写入 JSON 文件（invest-research pool-rate 使用）")
     screen_parser.set_defaults(func=_screen, _json=True)
 
     mr_parser = sub.add_parser("market-review")
