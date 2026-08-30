@@ -1,6 +1,7 @@
-# tushare_stock_data
+# stock-analytics
 
-Tushare 股票数据定时同步工具。纯脚本 + crontab 调度，不依赖大模型。
+Tushare 股票数据同步 + A股分析一体化工具（原 tushare_stock_data，2026-08-30 更名）。
+数据同步为纯脚本 + crontab 调度，不依赖大模型；分析命令直接读同步后的 sqlite。
 
 ## 架构
 
@@ -78,6 +79,7 @@ crontab（已配置）：
 # 策略筛选 / 报告
 ./venv/bin/python -m app.cli screen --strategy golden_bull_channel --codes 600519.SH,000858.SZ --output reports/screen.md
 ./venv/bin/python -m app.cli screen --strategy golden_bull_position_rating --universe a_share --min-circ-mv-e 200 --dry-run
+./venv/bin/python -m app.cli screen --strategy golden_bull_position_rating --codes 600519.SH --eval-json reports/eval.json
 ./venv/bin/python -m app.cli list-strategies
 ./venv/bin/python -m app.cli inspect-strategy --strategy golden_bull_channel
 
@@ -100,6 +102,10 @@ crontab（已配置）：
 ./venv/bin/python -m app.cli sync fina_indicator --ts-codes 600519.SH,000001.SZ   # 按需
 ./venv/bin/python -m app.cli sync finance --mode history                          # 全市场（约 2h/轮）
 ```
+
+**研报库联动（T3）**：`invest-research`（研报知识库）的 `pool-rate` 通过子进程调用本仓
+`screen --strategy golden_bull_position_rating --eval-json <path>` 获取评分明细并落快照；
+本仓目录路径可用环境变量 `POOL_RATING_ANALYTICS_DIR` 覆盖（研报库侧配置，默认本仓）。
 
 ## 数据集
 
@@ -127,5 +133,7 @@ app/
   sync/registry.py 数据集注册表
   tushare_client.py tushare API 封装（重试/限速）
   providers/      fallback 爬虫（tushare 无权限时备用）
+  analytics/      A股分析包（T2）：repository(sqlite) / screen / market_review
+                  market_period_review / account / report / baolei / chart / cli
 run_sync.sh       crontab 入口
 ```
