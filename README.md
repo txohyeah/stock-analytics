@@ -137,3 +137,52 @@ app/
                   market_period_review / account / report / baolei / chart / cli
 run_sync.sh       crontab 入口
 ```
+
+## Fallback 数据源
+
+默认开启 fallback。同步时会优先使用 Tushare；如果接口无权限、超时、连接异常，或 `daily` 在应同步日期返回空数据，会尝试备用来源。
+
+当前已实现：
+
+- `trade_cal`：使用 `exchange_calendars` 生成上交所交易日历；如果依赖不可用，则降级为工作日规则，并在日志中标记。
+- `daily`：使用东方财富历史 K 线接口补充个股日 K，字段会转换为当前 `daily` 表结构后批量 upsert。
+- `index_daily`：使用东方财富历史 K 线接口补充常用指数或指定指数日 K，字段会转换为当前 `index_daily` 表结构后批量 upsert。
+
+可通过命令行临时关闭：
+
+```bash
+python -m app.cli sync daily --start 20260505 --end 20260505 --no-fallback
+```
+
+也可在 `.env` 中调整：
+
+```bash
+ENABLE_FALLBACK=true
+CRAWLER_SLEEP_MIN_SECONDS=1.5
+CRAWLER_SLEEP_MAX_SECONDS=3.0
+CRAWLER_MAX_RETRIES=3
+CRAWLER_COOLDOWN_SECONDS=300
+CRAWLER_TIMEOUT_SECONDS=20
+# 可选：代理。CRAWLER_PROXY_URL 会同时用于 HTTP 和 HTTPS。
+# CRAWLER_PROXY_URL=http://user:password@proxy_host:proxy_port
+# CRAWLER_HTTP_PROXY=http://user:password@proxy_host:proxy_port
+# CRAWLER_HTTPS_PROXY=http://user:password@proxy_host:proxy_port
+```
+
+备用抓取源内置随机 User-Agent、随机请求间隔、指数退避和冷却机制。若东方财富返回 403/429，或持续出现远端断开连接，会进入冷却期，避免继续高频打同一个出口。批量同步时仍按 DataFrame 批量写库，不逐行写入。
+
+## 大模型按需补库
+
+当 `stock-analytics` 查询返回 `DATA_INSUFFICIENT` / `missing_data` 时，可以调用补库脚本。脚本只输出 JSON 状态，不输出原始行情数据：
+
+```bash
+python -m scripts.prepare_analysis_data --ts-codes 600519.SH --datasets daily,adj_factor,index_daily --start 20230101 --end 20260509
+```
+
+按 profile 准备数据：
+
+```bash
+python -m scripts.prepare_analysis_data --ts-codes 600519.SH,000001.SZ --profile technical --years 3
+```
+
+大模型调用说明见 `docs/LLM_STOCK_ANALYSIS_SKILL.md`。

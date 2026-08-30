@@ -83,6 +83,10 @@ class Settings:
     crawler_max_retries: int = 3
     crawler_cooldown_seconds: float = 300
     crawler_timeout_seconds: float = 20
+    # crawler proxy (fallback 爬虫代理)
+    crawler_proxy_url: str = ""
+    crawler_http_proxy: str = ""
+    crawler_https_proxy: str = ""
     # feishu notification (optional; failures are logged anyway)
     feishu_app_id: str = ""
     feishu_app_secret: str = ""
@@ -121,6 +125,9 @@ def get_settings() -> Settings:
         crawler_max_retries=_int_env("CRAWLER_MAX_RETRIES", 3),
         crawler_cooldown_seconds=_float_env("CRAWLER_COOLDOWN_SECONDS", 300),
         crawler_timeout_seconds=_float_env("CRAWLER_TIMEOUT_SECONDS", 20),
+        crawler_proxy_url=os.getenv("CRAWLER_PROXY_URL", ""),
+        crawler_http_proxy=os.getenv("CRAWLER_HTTP_PROXY", ""),
+        crawler_https_proxy=os.getenv("CRAWLER_HTTPS_PROXY", ""),
         feishu_app_id=os.getenv("FEISHU_APP_ID", ""),
         feishu_app_secret=os.getenv("FEISHU_APP_SECRET", ""),
         feishu_open_id=os.getenv("FEISHU_OPEN_ID", ""),
