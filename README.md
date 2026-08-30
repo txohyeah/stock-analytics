@@ -53,11 +53,53 @@ cp .env.example .env   # 填入 TUSHARE_TOKEN，按需选 DB_DRIVER
 crontab（已配置）：
 
 ```cron
-10 20 * * 1-5  /home/application/tushare_stock_data/run_sync.sh market
+10 20 * * 1-5  /home/application/stock-analytics/run_sync.sh market
 ```
 
 `run_sync.sh` 会写日志到 `logs/`（保留最近 30 份）。market 组内部先查 trade_cal，
 非交易日自动退出。
+
+## A股分析（T2，app/analytics/）
+
+数据同步与 A股分析一体：分析命令直接读 `data/stock.db`（sqlite，表名 tushare 原生），
+计算引擎来自公共包 `tech-indicators`（需 editable 安装：`./venv/bin/pip install -e /home/application/tech-indicators`）。
+
+```bash
+# 查询（8 类）
+./venv/bin/python -m app.cli query basic --code 600519.SH
+./venv/bin/python -m app.cli query stock-name --name 贵州茅台
+./venv/bin/python -m app.cli query history --code 600519.SH --lookback-days 120
+./venv/bin/python -m app.cli query daily-basic --code 600519.SH --start 20260824 --end 20260828
+./venv/bin/python -m app.cli query industries
+./venv/bin/python -m app.cli query industry --name 白酒
+./venv/bin/python -m app.cli query index --code 000001.SH --lookback-days 20
+./venv/bin/python -m app.cli query fina --code 600519.SH   # 需 fina_indicator 已同步
+
+# 策略筛选 / 报告
+./venv/bin/python -m app.cli screen --strategy golden_bull_channel --codes 600519.SH,000858.SZ --output reports/screen.md
+./venv/bin/python -m app.cli screen --strategy golden_bull_position_rating --universe a_share --min-circ-mv-e 200 --dry-run
+./venv/bin/python -m app.cli list-strategies
+./venv/bin/python -m app.cli inspect-strategy --strategy golden_bull_channel
+
+# 复盘 / 持仓 / 排雷 / 图表
+./venv/bin/python -m app.cli market-review --date latest
+./venv/bin/python -m app.cli market-period-review --period week
+./venv/bin/python -m app.cli account-review --positions positions.csv
+./venv/bin/python -m app.cli baolei --self-test        # 或 --codes / --all --report out.md
+./venv/bin/python -m app.cli chart --code 600519.SH --output chart.png
+
+# 独立分析入口（等价，命令面相同）
+./venv/bin/python -m app.analytics.cli query basic --code 600519.SH
+```
+
+**数据缺口**：`fina_indicator` / `income` / `balancesheet` / `cashflow` 需按 ts_code 逐股同步，
+当前 sqlite 未全量入库。`query fina` 与 `baolei` 检测到未同步时返回
+`DATA_INSUFFICIENT` 并给出同步命令：
+
+```bash
+./venv/bin/python -m app.cli sync fina_indicator --ts-codes 600519.SH,000001.SZ   # 按需
+./venv/bin/python -m app.cli sync finance --mode history                          # 全市场（约 2h/轮）
+```
 
 ## 数据集
 

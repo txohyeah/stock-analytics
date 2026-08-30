@@ -1,14 +1,16 @@
-"""Tushare stock data sync CLI.
+"""Tushare stock data sync CLI + A股分析 CLI（T2 一体化入口）。
 
-One-shot commands (no daemon). The crontab calls:
-
+同步（原有）：
     10 20 * * 1-5  run_sync.sh market
-    30 21 * * *    run_sync.sh finance
-
 market skips non-trading days automatically (trade_cal). Every dataset is
 recorded in sync_run; failures are retried at tushare-client level and a
 Feishu summary is sent when any dataset of a group fails and Feishu is
 configured.
+
+分析（T2 新增）：
+    query / screen / market-review / market-period-review / account-review
+    / baolei / chart / list-strategies / inspect-strategy / validate
+数据源为 sqlite（data/stock.db，表名 tushare 原生）；分析命令实现见 app/analytics。
 """
 from __future__ import annotations
 
@@ -139,7 +141,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(prog="app.cli", description="Tushare stock data sync tool")
+    parser = argparse.ArgumentParser(prog="app.cli", description="Tushare stock data sync + A股分析")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_sync = sub.add_parser("sync", help="Sync one dataset or a group (market/finance/all/<name>).")
@@ -160,8 +162,27 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_check = sub.add_parser("check-trade-day", help="Print trade-day/non-trade-day for today.")
     p_check.set_defaults(func=cmd_check_trade_day)
 
+    # A股分析命令（T2）：实现见 app/analytics/cli.py
+    from app.analytics.cli import add_analytics_subparsers
+
+    add_analytics_subparsers(sub)
+
     args = parser.parse_args(argv)
-    return int(args.func(args) or 0)
+    try:
+        return int(args.func(args) or 0)
+    except Exception as exc:  # noqa: BLE001 - analytics 命令的异常在此统一转 JSON 输出
+        from app.analytics.cli import _print_error
+        from app.analytics.errors import AnalyticsError
+
+        if isinstance(exc, AnalyticsError):
+            return _print_error(exc)
+        from tech_indicators.errors import TechIndicatorsError, UserInputError as TiUserInputError
+
+        if isinstance(exc, TiUserInputError):
+            return _print_error(AnalyticsError(str(exc), hint=getattr(exc, "hint", "")))
+        if isinstance(exc, TechIndicatorsError):
+            return _print_error(AnalyticsError(str(exc), hint=getattr(exc, "hint", "")))
+        raise
 
 
 if __name__ == "__main__":

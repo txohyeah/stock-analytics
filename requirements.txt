@@ -4,3 +4,5 @@ PyMySQL>=1.1.0
 requests>=2.31.0
 json5>=0.9.14
 exchange-calendars>=4.5.0
+# A股分析层（T2，app/analytics/）依赖公共技术指标包 tech-indicators。
+# 需本地 editable 安装：./venv/bin/pip install -e /home/application/tech-indicators

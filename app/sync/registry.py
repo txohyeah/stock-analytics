@@ -11,7 +11,12 @@ DATASETS: dict[str, Dataset] = {
         "stock_basic",
         ("ts_code",),
         "basic",
-        {"exchange": "", "list_status": "L"},
+        {
+            "exchange": "",
+            "list_status": "L",
+            # 显式全字段：默认返回仅 10 列（缺 fullname/exchange/list_status 等 A股分析所需字段）
+            "fields": "ts_code,symbol,name,area,industry,fullname,enname,cnspell,market,exchange,curr_type,list_status,list_date,delist_date,is_hs,act_name,act_ent_type",
+        },
     ),
     "daily": Dataset("daily", "daily", "daily", ("ts_code", "trade_date"), "trade_date"),
     "daily_basic": Dataset("daily_basic", "daily_basic", "daily_basic", ("ts_code", "trade_date"), "trade_date"),
