@@ -1,5 +1,10 @@
 # 四层筛子评分细则与否决条件
 
+> 本文档是 `00-framework.md` **步骤四**的细则。**三层结构**：
+> - **四层筛子** = 淘汰制主流程（任何一层否决即筛掉）
+> - **④b 参股价值重估** = 第四层补充分析，**不参与淘汰**
+> - **估值安全边际检查** = 筛子**之外**的必做检查（不是"第 5 个筛子"），不参与淘汰，只防"好逻辑被过度定价"
+
 这是淘汰制（而非加分制）——每一层筛掉不合格的候选。
 
 ```
@@ -112,12 +117,9 @@
 **工具**：tushare fina/balancesheet 查长期股权投资明细；web_search 搜公告。
 
 ```bash
-# 查长期股权投资、对联营/合营企业投资
-python3 << 'EOF'
-import tushare_query as tq
-# balancesheet 中的 longterm_equity_invest（长期股权投资）
-# finacial 中的 holder_equity（少数股东权益占比）
-EOF
+# 查长期股权投资、对联营/合营企业投资（stock-analytics 数据层）
+cd /home/application/stock-analytics
+./venv/bin/python -m app.cli query balancesheet --ts-codes <code>  # 长期股权投资 longterm_equity_invest
 ```
 
 #### 步骤 2：判断参股标的自身是否有价值（核心）
@@ -201,6 +203,8 @@ EOF
 ---
 
 ## 第五个考量（不在筛子内，但应在买入前评估）：估值安全边际
+
+> ⚠️ 注意：这不是"第 5 个筛子"，不参与四层淘汰——**逻辑对但价格贵**不会把标的中途淘汰，而是影响买入时机与仓位。
 
 在当前价格下，隐含的未来增速有多少已被市场定价？如果估值已充分反映甚至透支了预期，即使四层全过，也可能面临股价下跌——不是逻辑坏了，而是好逻辑被过分定价了。
 
