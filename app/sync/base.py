@@ -271,6 +271,26 @@ def sync_by_stock(ctx: SyncContext, dataset: Dataset, start_date: str, end_date:
     return fetched, affected
 
 
+def sync_by_stock_no_date(ctx: SyncContext, dataset: Dataset, start_date: str, end_date: str, ts_code: str | None) -> tuple[int, int]:
+    """per-stock 全量拉取（不带日期范围）。用于 fina_audit 等接口：
+    start_date/end_date 语义不同（公告日期），带日期会漏最新年报审计意见。
+    """
+    del start_date, end_date
+    codes = ctx.ts_codes or ([ts_code] if ts_code else read_stock_codes(ctx.store))
+    if not codes:
+        raise RuntimeError("No stock codes found. Run stock_basic sync first or pass --ts-code/--ts-codes.")
+
+    fetched = 0
+    affected = 0
+    params = dict(dataset.default_params or {})
+    for code in codes:
+        frame = ctx.client.query(dataset.api_name, ts_code=code, **params)
+        fetched += len(frame)
+        affected += upsert(ctx, dataset, frame)
+        logger.info("%s %s fetched=%s affected_total=%s", dataset.name, code, len(frame), affected)
+    return fetched, affected
+
+
 def sync_trade_cal(ctx: SyncContext, dataset: Dataset, start_date: str, end_date: str, ts_code: str | None) -> tuple[int, int]:
     del ts_code
     try:
@@ -302,6 +322,7 @@ STRATEGIES: dict[str, SyncFunction] = {
     "date_range": sync_single_call,
     "trade_date": sync_by_trade_date,
     "stock": sync_by_stock,
+    "stock_no_date": sync_by_stock_no_date,
     "trade_cal": sync_trade_cal,
     "index_basic": sync_index_basic,
 }

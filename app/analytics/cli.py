@@ -27,6 +27,7 @@ from .account import run_account_review
 from .baolei import run_baolei
 from .errors import AnalyticsError, UserInputError
 from .inputs import normalize_code
+from .lhb import run_lhb
 from .market_period_review import run_market_period_review
 from .market_review import run_market_review
 from .repository import SqliteRepository
@@ -225,6 +226,10 @@ def _baolei(args: argparse.Namespace) -> dict[str, object]:
     )
 
 
+def _lhb(args: argparse.Namespace) -> dict[str, object]:
+    return run_lhb(trade_date=args.trade_date, db_path=args.database)
+
+
 def _chart(args: argparse.Namespace) -> dict[str, object]:
     repository = _stock_repository(args.database)
     return run_chart(
@@ -333,6 +338,11 @@ def add_analytics_subparsers(sub) -> None:
     baolei_parser.add_argument("--report", type=str, default="")
     _db_arg(baolei_parser)
     baolei_parser.set_defaults(func=_baolei, _json=True)
+
+    lhb_parser = sub.add_parser("lhb", help="龙虎榜超买/超卖信号（top_list）")
+    lhb_parser.add_argument("--trade-date", type=str, default=None, help="交易日 YYYYMMDD（默认最近有数据交易日）")
+    _db_arg(lhb_parser)
+    lhb_parser.set_defaults(func=_lhb, _json=True)
 
     chart_parser = sub.add_parser("chart")
     chart_parser.add_argument("--code", required=True)

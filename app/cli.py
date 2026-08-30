@@ -169,7 +169,13 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     args = parser.parse_args(argv)
     try:
-        return int(args.func(args) or 0)
+        result = args.func(args)
+        # analytics 子命令返回 dict（JSON payload）→ 统一 JSON 输出
+        if isinstance(result, dict):
+            from app.analytics.cli import _print_ok
+
+            return _print_ok(result)
+        return int(result or 0)
     except Exception as exc:  # noqa: BLE001 - analytics 命令的异常在此统一转 JSON 输出
         from app.analytics.cli import _print_error
         from app.analytics.errors import AnalyticsError

@@ -36,6 +36,12 @@ DATASETS: dict[str, Dataset] = {
     "income": Dataset("income", "income", "income", ("ts_code", "end_date", "ann_date", "report_type"), "stock"),
     "balancesheet": Dataset("balancesheet", "balancesheet", "balancesheet", ("ts_code", "end_date", "ann_date", "report_type"), "stock"),
     "cashflow": Dataset("cashflow", "cashflow", "cashflow", ("ts_code", "end_date", "ann_date", "report_type"), "stock"),
+    # 排雷审计意见（baolei 雷区零，按股全量拉：带日期会漏最新年报审计意见）
+    "fina_audit": Dataset("fina_audit", "fina_audit", "fina_audit", ("ts_code", "end_date"), "stock_no_date"),
+    # 龙虎榜每日明细（lhb 信号，按交易日同步）
+    "top_list": Dataset("top_list", "top_list", "top_list", ("trade_date", "ts_code"), "trade_date"),
+    # 上市公司资料（主营/省份等，lhb 细分链归类用；basic 策略=单次全量拉取，需 2000 积分档）
+    "stock_company": Dataset("stock_company", "stock_company", "stock_company", ("ts_code",), "basic"),
 }
 
 BOOTSTRAP_ORDER = ("trade_cal", "stock_basic")
