@@ -30,8 +30,11 @@ DATASETS: dict[str, Dataset] = {
     ),
     "index_daily": Dataset("index_daily", "index_daily", "index_daily", ("ts_code", "trade_date"), "trade_date"),
     "index_daily_basic": Dataset("index_daily_basic", "index_dailybasic", "index_daily_basic", ("ts_code", "trade_date"), "trade_date"),
-    "moneyflow_ths": Dataset("moneyflow_ths", "moneyflow_ths", "moneyflow_ths", ("ts_code", "trade_date"), "trade_date"),
-    "kpl_concept_cons": Dataset("kpl_concept_cons", "kpl_concept_cons", "kpl_concept_cons", ("ts_code", "con_code", "trade_date"), "trade_date"),
+    # moneyflow_ths（同花顺资金流）/ kpl_concept_cons（概念成分）：Tushare 2000 积分档实测无访问权限
+    # （2026-08-29 确认，见 memory/2026-08-29/tushare-sync-redesign.md），已从 DAILY_ORDER 摘除避免
+    # 每个交易日 20:10 定时同步报错并触发飞书通知；待积分升档后再恢复。
+    # "moneyflow_ths": Dataset("moneyflow_ths", "moneyflow_ths", "moneyflow_ths", ("ts_code", "trade_date"), "trade_date"),
+    # "kpl_concept_cons": Dataset("kpl_concept_cons", "kpl_concept_cons", "kpl_concept_cons", ("ts_code", "con_code", "trade_date"), "trade_date"),
     "fina_indicator": Dataset("fina_indicator", "fina_indicator", "fina_indicator", ("ts_code", "end_date", "ann_date"), "stock"),
     "income": Dataset("income", "income", "income", ("ts_code", "end_date", "ann_date", "report_type"), "stock"),
     "balancesheet": Dataset("balancesheet", "balancesheet", "balancesheet", ("ts_code", "end_date", "ann_date", "report_type"), "stock"),
@@ -55,8 +58,9 @@ DAILY_ORDER = (
     "index_basic",
     "index_daily",
     "index_daily_basic",
-    "moneyflow_ths",
-    "kpl_concept_cons",
+    # moneyflow_ths / kpl_concept_cons：2000 积分档无权限（2026-08-29 实测），暂不纳入定时同步
+    # "moneyflow_ths",
+    # "kpl_concept_cons",
 )
 
 FINANCE_ORDER = ("fina_indicator", "income", "balancesheet", "cashflow")
