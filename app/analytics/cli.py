@@ -232,9 +232,11 @@ def _lhb(args: argparse.Namespace) -> dict[str, object]:
 
 def _chart(args: argparse.Namespace) -> dict[str, object]:
     repository = _stock_repository(args.database)
+    code = normalize_code(args.code)
     return run_chart(
         repository,
-        code=args.code,
+        code=code.code,
+        ts_code=code.ts_code,
         requested_date=args.date,
         lookback_days=args.lookback_days,
         indicators=args.indicators,
