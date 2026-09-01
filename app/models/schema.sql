@@ -139,6 +139,31 @@ CREATE TABLE IF NOT EXISTS index_daily_basic (
   KEY idx_index_daily_basic_trade_date (trade_date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE IF NOT EXISTS moneyflow (
+  ts_code VARCHAR(16) NOT NULL,
+  trade_date CHAR(8) NOT NULL,
+  buy_sm_vol DECIMAL(24,4) NULL,
+  buy_sm_amount DECIMAL(24,4) NULL,
+  sell_sm_vol DECIMAL(24,4) NULL,
+  sell_sm_amount DECIMAL(24,4) NULL,
+  buy_md_vol DECIMAL(24,4) NULL,
+  buy_md_amount DECIMAL(24,4) NULL,
+  sell_md_vol DECIMAL(24,4) NULL,
+  sell_md_amount DECIMAL(24,4) NULL,
+  buy_lg_vol DECIMAL(24,4) NULL,
+  buy_lg_amount DECIMAL(24,4) NULL,
+  sell_lg_vol DECIMAL(24,4) NULL,
+  sell_lg_amount DECIMAL(24,4) NULL,
+  buy_elg_vol DECIMAL(24,4) NULL,
+  buy_elg_amount DECIMAL(24,4) NULL,
+  sell_elg_vol DECIMAL(24,4) NULL,
+  sell_elg_amount DECIMAL(24,4) NULL,
+  net_mf_vol DECIMAL(24,4) NULL,
+  net_mf_amount DECIMAL(24,4) NULL,
+  PRIMARY KEY (ts_code, trade_date),
+  KEY idx_moneyflow_trade_date (trade_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 CREATE TABLE IF NOT EXISTS stock_moneyflow_ths (
   ts_code VARCHAR(16) NOT NULL,
   trade_date CHAR(8) NOT NULL,

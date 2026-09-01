@@ -21,6 +21,8 @@ DATASETS: dict[str, Dataset] = {
     "daily": Dataset("daily", "daily", "daily", ("ts_code", "trade_date"), "trade_date"),
     "daily_basic": Dataset("daily_basic", "daily_basic", "daily_basic", ("ts_code", "trade_date"), "trade_date"),
     "adj_factor": Dataset("adj_factor", "adj_factor", "adj_factor", ("ts_code", "trade_date"), "trade_date"),
+    # 个股资金流向（标准版，2000 积分档可调；2026-09-01 实测解锁，按交易日全市场拉取）
+    "moneyflow": Dataset("moneyflow", "moneyflow", "moneyflow", ("ts_code", "trade_date"), "trade_date"),
     "index_basic": Dataset(
         "index_basic",
         "index_basic",
@@ -55,6 +57,7 @@ DAILY_ORDER = (
     "daily",
     "daily_basic",
     "adj_factor",
+    "moneyflow",
     "index_basic",
     "index_daily",
     "index_daily_basic",
