@@ -413,6 +413,42 @@ class SqliteRepository:
             raise DatabaseConnectionError(str(exc)) from exc
         return [dict(row) for row in rows]
 
+    def fetch_moneyflow(
+        self,
+        ts_code: str,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> list[dict[str, Any]]:
+        start_date = _compact_date(start_date) if start_date else None
+        end_date = _compact_date(end_date) if end_date else None
+        params: list[Any] = [ts_code]
+        filters = ["ts_code = ?"]
+        if start_date:
+            filters.append("trade_date >= ?")
+            params.append(start_date)
+        if end_date:
+            filters.append("trade_date <= ?")
+            params.append(end_date)
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    f"""
+                    SELECT ts_code, trade_date,
+                           buy_sm_vol, buy_sm_amount, sell_sm_vol, sell_sm_amount,
+                           buy_md_vol, buy_md_amount, sell_md_vol, sell_md_amount,
+                           buy_lg_vol, buy_lg_amount, sell_lg_vol, sell_lg_amount,
+                           buy_elg_vol, buy_elg_amount, sell_elg_vol, sell_elg_amount,
+                           net_mf_vol, net_mf_amount
+                    FROM moneyflow
+                    WHERE {" AND ".join(filters)}
+                    ORDER BY trade_date
+                    """,
+                    params,
+                ).fetchall()
+        except sqlite3.Error as exc:
+            raise DatabaseConnectionError(str(exc)) from exc
+        return [dict(row) for row in rows]
+
     def fetch_stock_history(
         self,
         ts_codes: list[str],

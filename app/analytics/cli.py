@@ -88,6 +88,12 @@ def _query(args: argparse.Namespace) -> dict[str, object]:
         if args.latest:
             rows = rows[-1:] if rows else []
         return {"ok": True, "query": command, "code": code.ts_code, "count": len(rows), "data": rows}
+    if command == "moneyflow":
+        code = normalize_code(args.code)
+        rows = repository.fetch_moneyflow(code.ts_code, args.start, args.end)
+        if args.latest:
+            rows = rows[-1:] if rows else []
+        return {"ok": True, "query": command, "code": code.ts_code, "count": len(rows), "data": rows}
     if command == "history":
         from .inputs import parse_codes_arg as _pc
         codes, invalid = _pc(",".join(args.code))
@@ -289,6 +295,11 @@ def add_analytics_subparsers(sub) -> None:
     q_db.add_argument("--start")
     q_db.add_argument("--end")
     q_db.add_argument("--latest", action="store_true", help="只返回最新一条（省略全序列）")
+    q_mf = query_sub.add_parser("moneyflow", help="个股资金流向（小/中/大/特大单买卖金额，单位万元）")
+    q_mf.add_argument("--code", required=True)
+    q_mf.add_argument("--start")
+    q_mf.add_argument("--end")
+    q_mf.add_argument("--latest", action="store_true", help="只返回最新一条（省略全序列）")
     q_hist = query_sub.add_parser("history")
     q_hist.add_argument("--code", action="append", required=True)
     q_hist.add_argument("--start")
