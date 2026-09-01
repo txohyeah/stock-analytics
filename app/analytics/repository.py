@@ -355,6 +355,32 @@ class SqliteRepository:
             raise DatabaseConnectionError(str(exc)) from exc
         return dict(row) if row else None
 
+    def fetch_fina_indicator_recent(self, ts_code: str, n: int) -> list[dict[str, Any]]:
+        """取最近 n 个报告期（end_date 倒序），n<=0 报错。用于纵向看增速/趋势。"""
+        if n <= 0:
+            raise UserInputError("--recent must be >= 1")
+        table = "fina_indicator"
+        try:
+            with self._connect() as conn:
+                exists = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
+                ).fetchone()
+                if not exists:
+                    raise DataInsufficientError(
+                        f"{table} 表未同步（sqlite 无此表）",
+                        hint=(
+                            f"先按需同步：./venv/bin/python -m app.cli sync fina_indicator "
+                            f"--ts-codes {ts_code}"
+                        ),
+                    )
+                rows = conn.execute(
+                    f"SELECT * FROM {table} WHERE ts_code = ? ORDER BY end_date DESC LIMIT ?",
+                    (ts_code, n),
+                ).fetchall()
+        except sqlite3.Error as exc:
+            raise DatabaseConnectionError(str(exc)) from exc
+        return [dict(row) for row in rows]
+
     def fetch_daily_basic(
         self,
         ts_code: str,

@@ -69,11 +69,24 @@ def _query(args: argparse.Namespace) -> dict[str, object]:
         }
     if command == "fina":
         code = normalize_code(args.code)
+        if args.recent:
+            rows = repository.fetch_fina_indicator_recent(code.ts_code, args.recent)
+            return {
+                "ok": True,
+                "query": command,
+                "code": code.ts_code,
+                "period": f"recent:{args.recent}",
+                "count": len(rows),
+                "found": bool(rows),
+                "data": rows,
+            }
         data = repository.fetch_fina_indicator(code.ts_code, args.period)
         return {"ok": True, "query": command, "code": code.ts_code, "period": args.period, "found": data is not None, "data": data}
     if command == "daily-basic":
         code = normalize_code(args.code)
         rows = repository.fetch_daily_basic(code.ts_code, args.start, args.end)
+        if args.latest:
+            rows = rows[-1:] if rows else []
         return {"ok": True, "query": command, "code": code.ts_code, "count": len(rows), "data": rows}
     if command == "history":
         from .inputs import parse_codes_arg as _pc
@@ -267,6 +280,7 @@ def add_analytics_subparsers(sub) -> None:
     q_fina = query_sub.add_parser("fina")
     q_fina.add_argument("--code", required=True)
     q_fina.add_argument("--period", default="latest")
+    q_fina.add_argument("--recent", type=int, help="取最近 N 个报告期（end_date 倒序），data 返回 list；与 --period 互斥", default=None)
     q_name = query_sub.add_parser("stock-name")
     q_name.add_argument("--name", required=True)
     q_name.add_argument("--limit", type=int, default=10)
@@ -274,6 +288,7 @@ def add_analytics_subparsers(sub) -> None:
     q_db.add_argument("--code", required=True)
     q_db.add_argument("--start")
     q_db.add_argument("--end")
+    q_db.add_argument("--latest", action="store_true", help="只返回最新一条（省略全序列）")
     q_hist = query_sub.add_parser("history")
     q_hist.add_argument("--code", action="append", required=True)
     q_hist.add_argument("--start")
