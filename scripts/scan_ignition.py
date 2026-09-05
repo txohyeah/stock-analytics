@@ -140,11 +140,17 @@ def main() -> int:
     ap.add_argument("--csv", help="把结果导出成 CSV")
     ap.add_argument("--limit", type=int, default=60, help="最多列多少行")
     ap.add_argument("--all", action="store_true", help="包含 C 档（深跌未到位且未离底）")
+    ap.add_argument("--codes", help="只扫指定票池：逗号分隔代码，或 @文件（每行一个 ts_code）")
     args = ap.parse_args()
 
     con = sqlite3.connect(DB)
     day = args.date or latest_date(con)
     uni = universe(con, str(int(day[:4]) - 1) + "0101" if day[4:] >= "0101" else day)
+    if args.codes:
+        wanted = (open(args.codes[1:]).read().split() if args.codes.startswith("@")
+                  else [c.strip() for c in args.codes.split(",") if c.strip()])
+        uni = uni[uni.ts_code.isin(wanted)]
+        print(f"限定票池 {len(wanted)} 只 → 池内满足基础条件（非ST、上市满一年、未退市）的 {len(uni)} 只", file=sys.stderr)
     basic = pd.read_sql_query(
         "SELECT ts_code, name, industry FROM stock_basic WHERE name NOT LIKE '%ST%'", con
     ).set_index("ts_code")
