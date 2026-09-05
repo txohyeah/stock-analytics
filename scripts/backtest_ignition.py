@@ -84,6 +84,68 @@ def load_stock(con, code: str, start: str, end: str) -> pd.DataFrame | None:
     return std
 
 
+def load_window(con, code: str, start_year: int, end: str) -> pd.DataFrame | None:
+    """取 start_year 年初起的那段行情，但指标/信号在前两年预热数据上算好，避免边界失真。"""
+    df = load_stock(con, code, f"{start_year - LOOKBACK_YEARS}0101", end)
+    if df is None:
+        return None
+    part = df[df.trade_date.astype(str) >= f"{start_year}0101"].reset_index(drop=True)
+    return part if len(part) >= 120 else None
+
+
+def add_filter_variants(df: pd.DataFrame) -> pd.DataFrame:
+    """补上三种买入口径：s0 裸 CROSS、s2 裸+形态、s3 定稿v2（位置+形态）。"""
+    from tech_indicators.ignition import ignition_candle_filter, ignition_position_filter
+    std = df[["trade_date", "open", "high", "low", "close", "vol", "pct_chg"]].reset_index(drop=True)
+    bare = ignition_cross_signal(std).values
+    pos = ignition_position_filter(std).fillna(False).values
+    candle = ignition_candle_filter(std).fillna(False).values
+    out = df.copy()
+    out["s0"] = bare
+    out["s2"] = bare & candle
+    out["s3"] = bare & pos & candle
+    return out
+
+
+def run_single(con, cohorts: list[int], end: str, pool_size: int, min_mv: float, max_mv: float,
+               variants: dict[str, str]) -> None:
+    args_end = [end]
+    """单票串行回测：一只票独占 100 万、一次只持一笔 —— 对应"手动、盯得住几只票"的真实场景。"""
+    loaded = []
+    for y0 in cohorts:
+        for code in make_pool(con, y0, pool_size, min_mv, max_mv):
+            df = load_window(con, code, y0, args_end[0])
+            if df is not None:
+                loaded.append((code, y0, add_filter_variants(df)))
+    for label, col in variants.items():
+        rows = []
+        for code, y0, df in loaded:
+            r = simulate_single(df, col)
+            if r:
+                r["code"], r["cohort"] = code, y0
+                r.pop("trade_frame", None)
+                rows.append(r)
+        if not rows:
+            continue
+        t = pd.DataFrame(rows)
+        print(f"\n=== 单票串行 · {label} · {len(cohorts)} 批 × {pool_size} 只 = {len(t)} 个独立账户 ===")
+        print("  （每只票单独 100 万，一次只持一笔；收益不可跨票相加，看分布）")
+        q = t.total_pct.quantile
+        print(f"  累计收益：中位 {t.total_pct.median():+.1f}%  均值 {t.total_pct.mean():+.1f}%  "
+              f"25分位 {q(.25):+.1f}%  75分位 {q(.75):+.1f}%  最差 {t.total_pct.min():+.1f}%  最好 {t.total_pct.max():+.1f}%")
+        print(f"  年化：中位 {t.annualized.median():+.1f}%  25分位 {t.annualized.quantile(.25):+.1f}%  "
+              f"75分位 {t.annualized.quantile(.75):+.1f}%")
+        print(f"  赚钱的票占比 {(t.total_pct > 0).mean() * 100:.0f}%   零信号的票 {(t.trades == 0).sum()} 只   "
+              f"中位最大回撤 {t.max_dd.median():.1f}%   25分位回撤 {t.max_dd.quantile(.25):.1f}%   "
+              f"中位交易 {t.trades.median():.0f} 笔 / {t.bars.median() / 244:.1f} 年")
+        for y0 in cohorts:
+            sub = t[t.cohort == y0]
+            if len(sub):
+                print(f"    {y0}年起做{len(sub):3d}只：中位累计 {sub.total_pct.median():+7.1f}%  "
+                      f"中位年化 {sub.annualized.median():+6.1f}%  赚钱占比 {(sub.total_pct>0).mean()*100:3.0f}%  "
+                      f"中位回撤 {sub.max_dd.median():6.1f}%  中位笔数 {sub.trades.median():4.0f}")
+
+
 def make_pool(con, year: int, size: int, min_mv: float, max_mv: float) -> list[str]:
     """按 Y-1 年时点选池（无前视），含退市股。"""
     prior = str(year - 1)
@@ -103,6 +165,122 @@ def make_pool(con, year: int, size: int, min_mv: float, max_mv: float) -> list[s
     universe = universe[universe.list_date <= f"{prior}-01-01"]        # 年初即上市满一年
     universe = universe[(universe.circ_mv >= min_mv) & (universe.circ_mv <= max_mv)]
     return universe.sort_values("a", ascending=False).head(size).ts_code.tolist()
+
+
+def position_step(a: dict, i: int, p: dict, sig_col: str) -> tuple[bool, bool, str]:
+    """推进一根 K 线，返回 (是否全平, 是否减半, 原因)。组合回测与单票回测共用同一套卖出规则。
+
+    a 需含 open/high/low/close/sig_col/upper/bear 数组；p 为持仓字典。
+    """
+    close = a["close"][i]
+    if not np.isfinite(close):
+        return False, False, ""
+    p["last"] = close
+    p["hi"] = max(p["hi"], a["high"][i])
+    hi = p["hi"]
+    if not p["running"] and hi / p["entry"] - 1 >= IGNITION_RUN_GAIN_PCT:
+        p["running"] = True
+    if not p["running"] and a[sig_col][i] and i > p["sig_i"]:          # 新起爆点重锚止损
+        p["stop"] = max(p["entry"] * (1 - IGNITION_STOP_PCT),
+                        float(np.nanmin(a["low"][max(0, i - IGNITION_STOP_BARS + 1):i + 1])))
+        p["sig_i"] = i
+    if p["running"]:
+        if (hi - close) >= IGNITION_TRAIL_FRACTION * (hi - p["entry"]):
+            return True, False, "移动止盈"
+    elif close < p["stop"]:
+        return True, False, "止损"
+    if not p["half_reduced"] and a["high"][i] >= a["upper"][i] * IGNITION_UPPER_TOUCH \
+            and close < a["upper"][i]:
+        body = abs(close - a["open"][i])
+        shadow = a["high"][i] - max(close, a["open"][i])
+        bearish = close < a["open"][i]
+        long_shadow = close >= a["open"][i] and body > 0 and shadow >= 2 * body and shadow >= 0.03 * close
+        if bearish or long_shadow:
+            if a["bear"][i]:
+                return True, False, "上沿压制·熊市清仓"
+            return False, True, "上沿压制·减半"
+    return False, False, ""
+
+
+def new_position(a: dict, i: int, alloc: float) -> dict:
+    """按同一规则建仓：止损 = max(买价×(1-10%), 起爆点及其前 4 根最低价)。"""
+    price = a["close"][i]
+    return {"i0": i, "entry": price, "shares": alloc / (price * (1 + FEE)), "last": price,
+            "hi": a["high"][i], "running": False, "half_reduced": False, "sig_i": i,
+            "stop": max(price * (1 - IGNITION_STOP_PCT),
+                        float(np.nanmin(a["low"][max(0, i - IGNITION_STOP_BARS + 1):i + 1])))}
+
+
+def bar_arrays(df: pd.DataFrame, sig_col: str) -> dict:
+    return {col: df[col].values for col in
+            ("open", "high", "low", "close", "pct_chg", "trade_date", sig_col)} | {
+            "upper": df["upper"].values, "bear": df["bear"].values}
+
+
+def simulate_single(df: pd.DataFrame, sig_col: str, capital: float = 1_000_000.0) -> dict:
+    """单票串行：一只票独占全部资金，一次只持一笔，信号来了就满仓进、按同一套规则出。
+
+    这是"手动交易、一年做不了几笔、只想盯一两只票"的真实场景。
+    返回该票这段时期的完整净值曲线与逐笔交易。
+    """
+    a = bar_arrays(df, sig_col)
+    n = len(df)
+    cash, pos, pending, trades = capital, None, None, []
+    curve = np.full(n, np.nan)
+    for i in range(n):
+        if pos is not None:
+            go, half, reason = position_step(a, i, pos, sig_col)
+            if go:
+                cash += pos["shares"] * pos["last"] * (1 - FEE - STAMP)
+                trades.append(dict(code=str(df.ts_code.iloc[0]) if "ts_code" in df else "",
+                                   buy=str(a["trade_date"][pos["i0"]]), sell=str(a["trade_date"][i]),
+                                   ret=pos["last"] / pos["entry"] - 1,
+                                   pnl=pos["shares"] * (pos["last"] - pos["entry"]),
+                                   days=i - pos["i0"], reason=reason))
+                pos = None
+            elif half:
+                cut = pos["shares"] * 0.5
+                cash += cut * pos["last"] * (1 - FEE - STAMP)
+                pos["shares"] -= cut
+                pos["half_reduced"] = True
+                trades.append(dict(buy=str(a["trade_date"][pos["i0"]]), sell=str(a["trade_date"][i]),
+                                   ret=pos["last"] / pos["entry"] - 1,
+                                   pnl=cut * (pos["last"] - pos["entry"]),
+                                   days=i - pos["i0"], reason=reason))
+        if pending is not None and i >= pending and pos is None:     # 挂单成交
+            price = a["close"][i]
+            if np.isfinite(price) and price > 0:
+                pos = new_position(a, i, cash)
+                cash = 0.0
+            pending = None
+
+        if pos is None and pending is None and a[sig_col][i] and i < n - 1:
+            if a["pct_chg"][i] > 5:                                   # 起爆日涨>5% 不追，次日买
+                pending = i + 1
+            else:
+                pos = new_position(a, i, cash)
+                cash = 0.0
+
+        curve[i] = cash + (pos["shares"] * pos["last"] if pos else 0.0)
+    if pos is not None:                                      # 期末（含退市）平仓
+        cash += pos["shares"] * pos["last"] * (1 - FEE - STAMP)
+        trades.append(dict(buy=str(a["trade_date"][pos["i0"]]), sell=str(a["trade_date"][n - 1]),
+                           ret=pos["last"] / pos["entry"] - 1,
+                           pnl=pos["shares"] * (pos["last"] - pos["entry"]),
+                           days=n - 1 - pos["i0"], reason="期末平仓"))
+        curve[n - 1] = cash
+    series = pd.Series(curve, index=df.trade_date.values).dropna()
+    if series.empty:
+        return None
+    dd = float(((series / series.cummax()) - 1).min())
+    tdf = pd.DataFrame(trades)
+    years = max(len(series) / 244, 0.5)
+    total = float(series.iloc[-1] / capital - 1)
+    return dict(total_pct=round(total * 100, 1), annualized=round(((1 + total) ** (1 / years) - 1) * 100, 1),
+                max_dd=round(dd * 100, 1), trades=len(tdf),
+                win=round(float((tdf.ret > 0).mean() * 100), 1) if len(tdf) else 0.0,
+                worst=round(float(tdf.ret.min() * 100), 1) if len(tdf) else 0.0,
+                bars=len(series), trade_frame=tdf)
 
 
 def simulate(bars: dict[str, pd.DataFrame], year: int, sig_col: str, frac: float, slot: int) -> dict:
@@ -133,13 +311,7 @@ def simulate(bars: dict[str, pd.DataFrame], year: int, sig_col: str, frac: float
             if alloc < 1e4 or not np.isfinite(price) or price <= 0:
                 return
             cash -= alloc
-            held[code] = {
-                "i0": i, "entry": price, "shares": alloc / (price * (1 + FEE)), "last": price,
-                "hi": a["high"][i], "running": False, "half": False,
-                "stop": max(price * (1 - IGNITION_STOP_PCT),
-                            float(np.nanmin(a["low"][max(0, i - IGNITION_STOP_BARS + 1):i + 1]))),
-                "sig_i": i,
-            }
+            held[code] = new_position(a, i, alloc)
 
         for code, when in list(pending):
             if day < when:
@@ -155,53 +327,21 @@ def simulate(bars: dict[str, pd.DataFrame], year: int, sig_col: str, frac: float
             i = look[code].get(day)
             if i is None:
                 continue
-            close = a["close"][i]
-            if not np.isfinite(close):
-                continue
             p = held[code]
-            p["last"] = close
-            p["hi"] = max(p["hi"], a["high"][i])
-            hi = p["hi"]
-            if not p["running"] and hi / p["entry"] - 1 >= IGNITION_RUN_GAIN_PCT:
-                p["running"] = True
-            if not p["running"] and a[sig_col][i] and i > p["sig_i"]:
-                p["stop"] = max(p["entry"] * (1 - IGNITION_STOP_PCT),
-                                float(np.nanmin(a["low"][max(0, i - IGNITION_STOP_BARS + 1):i + 1])))
-                p["sig_i"] = i
-
-            exit_px = None
-            reason = None
-            if p["running"]:
-                if (hi - close) >= IGNITION_TRAIL_FRACTION * (hi - p["entry"]):
-                    exit_px, reason = close, "移动止盈"
-            elif close < p["stop"]:
-                exit_px, reason = close, "止损"
-
-            half_now = False
-            if exit_px is None and not p["half"] \
-                    and a["high"][i] >= a["upper"][i] * IGNITION_UPPER_TOUCH and close < a["upper"][i]:
-                body = abs(close - a["open"][i])
-                shadow = a["high"][i] - max(close, a["open"][i])
-                bearish = close < a["open"][i]
-                long_shadow = close >= a["open"][i] and body > 0 and shadow >= 2 * body and shadow >= 0.03 * close
-                if bearish or long_shadow:
-                    if bool(a["bear"][i]):
-                        exit_px, reason = close, "上沿压制·熊市清仓"
-                    else:
-                        half_now = True
-                        reason = "上沿压制·减半"
-
-            if exit_px is not None:
+            go, half, reason = position_step(a, i, p, sig_col)
+            if go:
+                exit_px = p["last"]
                 cash += p["shares"] * exit_px * (1 - FEE - STAMP)
                 trades.append(dict(code=code, buy=str(a["trade_date"][p["i0"]]), sell=day,
                                    ret=exit_px / p["entry"] - 1,
                                    pnl=p["shares"] * (exit_px - p["entry"]), days=i - p["i0"], reason=reason))
                 del held[code]
-            elif half_now:
+            elif half:
+                close = p["last"]
                 cut = p["shares"] * 0.5
                 cash += cut * close * (1 - FEE - STAMP)
                 p["shares"] -= cut
-                p["half"] = True
+                p["half_reduced"] = True
                 trades.append(dict(code=code, buy=str(a["trade_date"][p["i0"]]), sell=day,
                                    ret=close / p["entry"] - 1,
                                    pnl=cut * (close - p["entry"]), days=i - p["i0"], reason=reason))
@@ -256,8 +396,22 @@ def main() -> int:
     ap.add_argument("--slot", type=int, default=10, help="最大同时持仓数")
     ap.add_argument("--variant", choices=["v2", "bare", "both"], default="v2")
     ap.add_argument("--trades-out", help="把逐笔交易导出成 CSV（仅最后一个变体）")
+    ap.add_argument("--mode", choices=["portfolio", "single"], default="portfolio",
+                    help="portfolio=组合资金池；single=每只票独立100万串行（手动交易场景）")
+    ap.add_argument("--cohorts", type=int, nargs="*", default=[2018, 2020, 2022, 2024],
+                    help="single 模式：从哪些年份各选一批票一直做到样本末")
+    ap.add_argument("--end", default="20260903")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
+
+    if args.mode == "single":
+        con = sqlite3.connect(DB)
+        try:
+            run_single(con, args.cohorts, args.end, args.pool_size, args.min_mv, args.max_mv,
+                       {"裸 CROSS(RSI6,40)": "s0", "裸+形态过滤": "s2", "定稿v2(位置+形态)": "s3"})
+        finally:
+            con.close()
+        return 0
 
     years = args.years or list(range(args.start_year, args.end_year + 1))
     cols = {"v2": ["sig_v2"], "bare": ["sig_bare"], "both": ["sig_v2", "sig_bare"]}[args.variant]
