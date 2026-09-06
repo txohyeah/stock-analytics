@@ -4,8 +4,9 @@
 设计要点：
 1. 买点由库函数给出：`ignition_signal_series`（定稿 v2，含三道买入过滤）
    或 `ignition_cross_signal`（裸 CROSS(RSI6,40)，用于看过滤的边际贡献）。
-2. 卖出参数（止损比例/重锚窗口/利润奔跑门槛/移动止盈比例/上沿容差）全部读库里的常量，
-   不在本脚本里重复定义数字。
+2. 卖出算法唯一实现在库：`IgnitionPosition.step`（C2：上沿全清 + 滚动结构止损，
+   移动止盈默认关）；本脚本的 position_step/new_position 只是薄适配层
+   （停牌保护、资金份额记账、英文原因 → 中文明细名映射），不包含任何规则数字。
 3. 票池按"当年时点"逐年重建：用 Y-1 年的成交额与 Y-1 年末流通市值筛选，
    含退市股（需先跑 scripts/backfill_delisted_basic.py，否则有幸存者偏差）。
 4. 组合级单一资金池：每笔 = 当时权益 × frac，最多 slot 只，满槽则丢弃信号。
@@ -33,18 +34,17 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from tech_indicators.ignition import (  # noqa: E402
-    IGNITION_RUN_GAIN_PCT,
-    IGNITION_STOP_BARS,
-    IGNITION_STOP_PCT,
-    IGNITION_TRAIL_FRACTION,
-    IGNITION_UPPER_EXIT,
-    IGNITION_UPPER_TOUCH,
+    IgnitionPosition,
     golden_channel_state,
     ignition_cross_signal,
     ignition_signal_series,
 )
 
 DB = ROOT / "data" / "stock.db"
+
+# 库侧英文原因 → 交易明细中文列名（口径与历史 CSV 保持一致）
+REASON_ZH = {"stop_loss": "止损", "trailing_take_profit": "移动止盈",
+             "upper_pressure_exit": "上沿压制·全清", "upper_pressure_half": "上沿压制·减半"}
 SINGLE_OUT = [None]   # 由 --single-out 设置，导出逐票分布表
 FEE = 0.001
 STAMP = 0.0005
@@ -192,50 +192,27 @@ def make_pool(con, year: int, size: int, min_mv: float, max_mv: float) -> list[s
     return universe.sort_values("a", ascending=False).head(size).ts_code.tolist()
 
 
-def position_step(a: dict, i: int, p: dict, sig_col: str) -> tuple[bool, bool, str]:
-    """推进一根 K 线，返回 (是否全平, 是否减半, 原因)。组合回测与单票回测共用同一套卖出规则。
-
-    a 需含 open/high/low/close/sig_col/upper/bear 数组；p 为持仓字典。
-    """
+def position_step(a: dict, i: int, p: dict, sig_col: str = "") -> tuple[bool, bool, str]:
+    """推进一根。**卖出规则唯一实现在库 IgnitionPosition.step**（tech-indicators@main），
+    这里只做：停牌保护、记账字段同步、英文原因 → 中文明细名映射。"""
     close = a["close"][i]
     if not np.isfinite(close):
-        return False, False, ""
+        return False, False, ""                       # 停牌/缺数据：整根跳过
     p["last"] = close
-    p["hi"] = max(p["hi"], a["high"][i])
-    hi = p["hi"]
-    # 滚动结构止损线 = max(买价×(1-硬10%), 截至昨日的最近 30 根最低价)。
-    # 窗口刻意不含当根：含当根时 close < min(low[...:i+1]) 恒不成立，止损位是纸面价。
-    ref = a["low"][max(0, i - IGNITION_STOP_BARS):i]
-    ref = ref[np.isfinite(ref)]
-    p["stop"] = max(p["entry"] * (1 - IGNITION_STOP_PCT),
-                    float(ref.min()) if len(ref) else -np.inf)
-    if not p["running"] and hi / p["entry"] - 1 >= IGNITION_RUN_GAIN_PCT:
-        p["running"] = True
-    if close < p["stop"]:        # 滚动止损线（见下），利润奔跑后依然有效——与 2026-09-05 定稿的 C2 一致
-        return True, False, "止损"
-    if p["running"] and (hi - close) >= IGNITION_TRAIL_FRACTION * (hi - p["entry"]):
-        return True, False, "移动止盈"
-    if not p["half_reduced"] and a["high"][i] >= a["upper"][i] * IGNITION_UPPER_TOUCH \
-            and close < a["upper"][i]:
-        body = abs(close - a["open"][i])
-        shadow = a["high"][i] - max(close, a["open"][i])
-        bearish = close < a["open"][i]
-        long_shadow = close >= a["open"][i] and body > 0 and shadow >= 2 * body and shadow >= 0.03 * close
-        if bearish or long_shadow:
-            if IGNITION_UPPER_EXIT == "full":
-                return True, False, "上沿压制·全清"
-            return False, True, "上沿压制·减半"
-    return False, False, ""
+    act = p["algo"].step(i, a["open"][i], a["high"][i], a["low"][i], close,
+                         a["upper"][i], a["low"])
+    if act is None:
+        return False, False, ""
+    kind, reason = act
+    return kind == "full", kind == "half", REASON_ZH[reason]
 
 
 def new_position(a: dict, i: int, alloc: float) -> dict:
-    """按同一规则建仓：止损线由 position_step 每根滚动重算，这里先给建仓根的初值。"""
+    """建仓：算法状态交给库的 IgnitionPosition，脚本只管资金份额。"""
     price = a["close"][i]
-    return {"i0": i, "entry": price, "shares": alloc / (price * (1 + FEE)), "last": price,
-            "hi": a["high"][i], "running": False, "half_reduced": False, "sig_i": i,
-            "stop": price * (1 - IGNITION_STOP_PCT)}
-
-
+    return {"i0": i, "entry": price, "last": price,
+            "shares": alloc / (price * (1 + FEE)),
+            "algo": IgnitionPosition.open_at(price, i, a["high"][i], a["low"])}
 def bar_arrays(df: pd.DataFrame, sig_col: str) -> dict:
     return {col: df[col].values for col in
             ("open", "high", "low", "close", "pct_chg", "trade_date", sig_col)} | {

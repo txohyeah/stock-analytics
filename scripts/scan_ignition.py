@@ -31,6 +31,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from tech_indicators.ignition import (  # noqa: E402
+    ignition_stop_line,
     IGNITION_DEEP_DRAWDOWN_PCT,
     IGNITION_STOP_BARS,
     IGNITION_STOP_PCT,
@@ -104,10 +105,9 @@ def scan_one(df: pd.DataFrame, name: str, industry: str) -> list[dict]:
     for i in range(len(df)):
         if np.isnan(dd60[i]) or np.isnan(rsi[i]) or np.isnan(np.nanmean(amp)):
             continue                       # 预热不足 60 根的开头几根跳过（不是整只票作废）
-        # 与回测/实盘同一套止损定义：滚动线 max(买价×(1-10%), 最近30根最低价)。
-        # 窗口含今日（建仓根）、不含明日（检查根），与 position_step 的滚动窗精确一致
-        stop = max(float(closes[i]) * (1 - IGNITION_STOP_PCT),
-                   float(np.nanmin(df.low.values[max(0, i - IGNITION_STOP_BARS + 1):i + 1])))
+        # 与回测/实盘同一套止损定义（库 ignition_stop_line，唯一实现）：
+        # 明日检查用的滚动线 = max(买价×(1-10%), 截至今日的最近30根最低价)——窗口含今日（建仓根）、不含明日（检查根）
+        stop = ignition_stop_line(float(closes[i]), df.low.values, i + 1)
         out.append(dict(
             trade_date=str(df.trade_date.iloc[i]), close=round(float(closes[i]), 2),
             stop=round(stop, 2), stop_pct=round((stop / float(closes[i]) - 1) * 100, 1),
