@@ -331,7 +331,17 @@ STRATEGIES: dict[str, SyncFunction] = {
 def run_dataset(ctx: SyncContext, dataset: Dataset, start_date: str, end_date: str, mode: str, ts_code: str | None = None) -> tuple[int, int]:
     run_id = insert_sync_run(ctx.store, dataset.name, mode, start_date, end_date)
     try:
-        fetched, affected = STRATEGIES[dataset.strategy](ctx, dataset, start_date, end_date, ts_code)
+        # daily / adj_factor are normally fetched once per trade date for the
+        # whole market.  A specified pool is far smaller and their APIs both
+        # support ts_code + date range, so use one request per code instead.
+        # Keep --ts-code on the original single-trade-date path for backwards
+        # compatibility; only the explicit batch option changes routing.
+        strategy = (
+            sync_by_stock
+            if dataset.name in {"daily", "adj_factor"} and ctx.ts_codes
+            else STRATEGIES[dataset.strategy]
+        )
+        fetched, affected = strategy(ctx, dataset, start_date, end_date, ts_code)
     except Exception as exc:
         finish_sync_run(ctx.store, run_id, "failed", 0, 0, str(exc))
         raise
