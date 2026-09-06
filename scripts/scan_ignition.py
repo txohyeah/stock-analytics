@@ -123,14 +123,28 @@ def scan_one(df: pd.DataFrame, name: str, industry: str) -> list[dict]:
     return out
 
 
-def tier(hit: dict) -> tuple[int, str]:
-    deep = hit["dd60"] <= IGNITION_DEEP_DRAWDOWN_PCT
-    off = hit["off_low"] >= IGNITION_OFF_BOTTOM_PCT
-    if deep and off:
-        return 0, "A"
-    if deep or off:
-        return 1, "B"
-    return 2, "C"
+def tier(hit: dict, deep_pct: float, slope: float) -> tuple[int, str]:
+    """四道条件合成四档。名字即含义，不做一票否决式的隐藏过滤。
+
+    超跌起爆：60日内至少跌过 deep_pct%，且已离底 ≥5%，且弹回不超过跌幅的 slope 倍
+    未离底  ：跌幅够但还贴着 60 日低点（下跌中继风险，历史 f20 最差）
+    追高    ：已弹回超过跌幅的 slope 倍（掉100弹回80，不是抄底）
+    浅回调  ：60日内根本没跌到 deep_pct%（强势票的小回调，历史 f20 期望≈0）
+    """
+    dd, off = hit["dd60"], hit["off_low"]
+    deep = dd <= -deep_pct
+    off_bottom = off >= IGNITION_OFF_BOTTOM_PCT
+    chased = off > slope * abs(dd)
+    if deep and off_bottom and not chased:
+        return 0, "超跌起爆"
+    if deep and chased:
+        return 3, "追高"
+    if not off_bottom:
+        return 2, "未离底"
+    return 1, "浅回调"
+
+
+ORDER = {"超跌起爆": 0, "浅回调": 1, "未离底": 2, "追高": 3}
 
 
 def main() -> int:
@@ -141,6 +155,9 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=60, help="最多列多少行")
     ap.add_argument("--all", action="store_true", help="包含 C 档（深跌未到位且未离底）")
     ap.add_argument("--codes", help="只扫指定票池：逗号分隔代码，或 @文件（每行一个 ts_code）")
+    ap.add_argument("--deep", type=float, default=30, help="超跌门槛：60日内至少跌过百分之几（默认 30）")
+    ap.add_argument("--slope", type=float, default=0.75,
+                    help="追高上限：弹回幅度不超过跌幅的这个倍数（默认 0.75；设 99 等于不启用）")
     args = ap.parse_args()
 
     con = sqlite3.connect(DB)
@@ -182,9 +199,10 @@ def main() -> int:
         print("无信号。")
         return 0
     hits = pd.DataFrame(rows).drop_duplicates("ts_code")
-    hits[["tier_n", "tier"]] = hits.apply(lambda r: pd.Series(tier(r)), axis=1)
+    hit_tiers = hits.apply(lambda r: tier(r, args.deep, args.slope), axis=1)
+    hits["tier"], hits["tier_n"] = hit_tiers.str[1], hit_tiers.map(lambda x: ORDER[x[1]])
     hits = hits.sort_values(["tier_n", "amp60"], ascending=[True, False])
-    shown = hits if args.all else hits[hits.tier_n <= 1]
+    shown = hits if args.all else hits[hits.tier == "超跌起爆"]
     if args.csv:
         hits.rename(columns=dict(
             ts_code="代码", name="名称", industry="行业", tier="位置档位", signal_date="信号日",
@@ -197,9 +215,11 @@ def main() -> int:
 
     print(f"\n扫描日 {day}（回看 {args.days} 个交易日）｜全市场非ST已上市满一年：{len(uni)} 只，"
           f"有行情且指标可用：{done} 只扫完")
-    print(f"命中上穿信号 {len(hits)} 只：A 档 {(hits.tier=='A').sum()}、B 档 {(hits.tier=='B').sum()}、"
-          f"C 档 {(hits.tier=='C').sum()}")
-    print("（A=深跌≥40%且已离底≥5%，历史单票胜率约73%；档内按波动率降序）\n")
+    dist = "、".join(f"{k} {(hits.tier==k).sum()}" for k in ORDER)
+    print(f"命中起爆点上穿 {len(hits)} 只 → {dist}")
+    print(f"（超跌起爆 = 60日内跌过{args.deep:.0f}% + 已离底≥{IGNITION_OFF_BOTTOM_PCT:.0f}% + "
+          f"弹回不超跌幅×{args.slope}，历史 20 日期望 +4.9%、胜率 64%；档内按波动率降序。"
+          f"注：MA20/MA60 同向向下的趋势闸门经 24379 笔前向收益复验为反向过滤，不设）\n")
     cols = shown.head(args.limit).rename(columns=dict(
         ts_code="代码", name="名称", industry="行业", tier="档", close="收盘价", dd60="距60高%",
         off_low="距60低%", amp60="振幅%", vol_x="量/昨", to_upper="距上沿%", rsi="RSI6",
