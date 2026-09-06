@@ -104,7 +104,8 @@ def scan_one(df: pd.DataFrame, name: str, industry: str) -> list[dict]:
     for i in range(len(df)):
         if np.isnan(dd60[i]) or np.isnan(rsi[i]) or np.isnan(np.nanmean(amp)):
             continue                       # 预热不足 60 根的开头几根跳过（不是整只票作废）
-        # 与回测/实盘同一套止损定义：max(买价×(1-10%), 起爆点及其前4根最低价)
+        # 与回测/实盘同一套止损定义：滚动线 max(买价×(1-10%), 最近30根最低价)。
+        # 窗口含今日（建仓根）、不含明日（检查根），与 position_step 的滚动窗精确一致
         stop = max(float(closes[i]) * (1 - IGNITION_STOP_PCT),
                    float(np.nanmin(df.low.values[max(0, i - IGNITION_STOP_BARS + 1):i + 1])))
         out.append(dict(
@@ -230,9 +231,10 @@ def main() -> int:
     pd.set_option("display.unicode.east_asian_width", True)
     with pd.option_context("display.max_columns", None, "display.width", 200):
         print(cols.to_string(index=False))
-    print("\n口径：买入价=信号日收盘（当日涨幅>5% 则次日再买，不追）；「止损价」= max(买价×0.90, "
-          "起爆点及其前4根最低价) 收盘价触发；浮盈曾≥20% 后改按「最高点−总涨幅×25%」移动止盈；"
-          "盘中摸到金牛上沿但收盘收回下方则减半（熊道=True 时清仓）。「距上沿%」是到那个减价位还有多少空间。")
+    print("\n口径（2026-09-05 因果版定稿）：买入价=信号日收盘（当日涨幅>5% 则次日再买，不追）；"
+          "「止损价」= max(买价×0.90, 最近30根最低价) 收盘触发、逐日滚动；"
+          "盘中摸到金牛上沿但收盘收回下方（阴线或长上影）→ 全清（2026-09-05 实测优于减半）；"
+          "移动止盈默认关闭（组合层实测关闭更优）；熊道仅作参考，不再触发清仓。「距上沿%」是到清仓价的空间。")
     return 0
 
 

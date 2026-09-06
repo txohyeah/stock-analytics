@@ -37,6 +37,7 @@ from tech_indicators.ignition import (  # noqa: E402
     IGNITION_STOP_BARS,
     IGNITION_STOP_PCT,
     IGNITION_TRAIL_FRACTION,
+    IGNITION_UPPER_EXIT,
     IGNITION_UPPER_TOUCH,
     golden_channel_state,
     ignition_cross_signal,
@@ -82,6 +83,8 @@ def load_stock(con, code: str, start: str, end: str) -> pd.DataFrame | None:
     channel = golden_channel_state(std, causal=True)
     std["upper"] = channel["upper"].values
     std["bear"] = channel["bear"].values
+    # 数据容器自检：日期必须是普通字符串（StringArray 切片有重建陷阱），各列等长由 DataFrame 构造保证
+    assert std["trade_date"].map(type).eq(str).all(), "trade_date 必须是纯 str"
     return std
 
 
@@ -200,17 +203,18 @@ def position_step(a: dict, i: int, p: dict, sig_col: str) -> tuple[bool, bool, s
     p["last"] = close
     p["hi"] = max(p["hi"], a["high"][i])
     hi = p["hi"]
+    # 滚动结构止损线 = max(买价×(1-硬10%), 截至昨日的最近 30 根最低价)。
+    # 窗口刻意不含当根：含当根时 close < min(low[...:i+1]) 恒不成立，止损位是纸面价。
+    ref = a["low"][max(0, i - IGNITION_STOP_BARS):i]
+    ref = ref[np.isfinite(ref)]
+    p["stop"] = max(p["entry"] * (1 - IGNITION_STOP_PCT),
+                    float(ref.min()) if len(ref) else -np.inf)
     if not p["running"] and hi / p["entry"] - 1 >= IGNITION_RUN_GAIN_PCT:
         p["running"] = True
-    if not p["running"] and a[sig_col][i] and i > p["sig_i"]:          # 新起爆点重锚止损
-        p["stop"] = max(p["entry"] * (1 - IGNITION_STOP_PCT),
-                        float(np.nanmin(a["low"][max(0, i - IGNITION_STOP_BARS + 1):i + 1])))
-        p["sig_i"] = i
-    if p["running"]:
-        if (hi - close) >= IGNITION_TRAIL_FRACTION * (hi - p["entry"]):
-            return True, False, "移动止盈"
-    elif close < p["stop"]:
+    if close < p["stop"]:        # 滚动止损线（见下），利润奔跑后依然有效——与 2026-09-05 定稿的 C2 一致
         return True, False, "止损"
+    if p["running"] and (hi - close) >= IGNITION_TRAIL_FRACTION * (hi - p["entry"]):
+        return True, False, "移动止盈"
     if not p["half_reduced"] and a["high"][i] >= a["upper"][i] * IGNITION_UPPER_TOUCH \
             and close < a["upper"][i]:
         body = abs(close - a["open"][i])
@@ -218,19 +222,18 @@ def position_step(a: dict, i: int, p: dict, sig_col: str) -> tuple[bool, bool, s
         bearish = close < a["open"][i]
         long_shadow = close >= a["open"][i] and body > 0 and shadow >= 2 * body and shadow >= 0.03 * close
         if bearish or long_shadow:
-            if a["bear"][i]:
-                return True, False, "上沿压制·熊市清仓"
+            if IGNITION_UPPER_EXIT == "full":
+                return True, False, "上沿压制·全清"
             return False, True, "上沿压制·减半"
     return False, False, ""
 
 
 def new_position(a: dict, i: int, alloc: float) -> dict:
-    """按同一规则建仓：止损 = max(买价×(1-10%), 起爆点及其前 4 根最低价)。"""
+    """按同一规则建仓：止损线由 position_step 每根滚动重算，这里先给建仓根的初值。"""
     price = a["close"][i]
     return {"i0": i, "entry": price, "shares": alloc / (price * (1 + FEE)), "last": price,
             "hi": a["high"][i], "running": False, "half_reduced": False, "sig_i": i,
-            "stop": max(price * (1 - IGNITION_STOP_PCT),
-                        float(np.nanmin(a["low"][max(0, i - IGNITION_STOP_BARS + 1):i + 1])))}
+            "stop": price * (1 - IGNITION_STOP_PCT)}
 
 
 def bar_arrays(df: pd.DataFrame, sig_col: str) -> dict:
