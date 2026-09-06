@@ -96,7 +96,7 @@ def scan_one(df: pd.DataFrame, name: str, industry: str) -> list[dict]:
     amp = ((df.high.values - df.low.values) / np.where(closes == 0, np.nan, closes) * 100)[-60:]
     volx = df.vol.values / np.where(pd.Series(df.vol.values).shift(1).values == 0, np.nan,
                                     pd.Series(df.vol.values).shift(1).values)
-    channel = golden_channel_state(df)
+    channel = golden_channel_state(df, causal=True)
     upper = channel["upper"].values
     bear = channel["bear"].values
     prev_rsi = np.concatenate([[np.nan], rsi[:-1]])

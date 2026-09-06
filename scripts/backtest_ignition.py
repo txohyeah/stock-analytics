@@ -44,6 +44,7 @@ from tech_indicators.ignition import (  # noqa: E402
 )
 
 DB = ROOT / "data" / "stock.db"
+SINGLE_OUT = [None]   # 由 --single-out 设置，导出逐票分布表
 FEE = 0.001
 STAMP = 0.0005
 LOOKBACK_YEARS = 2          # 复权因子与滚动指标需要的预热长度
@@ -78,7 +79,7 @@ def load_stock(con, code: str, start: str, end: str) -> pd.DataFrame | None:
     # 信号一律来自库；本脚本不重复实现任何判据
     std["sig_v2"] = ignition_signal_series(std).values
     std["sig_bare"] = ignition_cross_signal(std).values
-    channel = golden_channel_state(std)
+    channel = golden_channel_state(std, causal=True)
     std["upper"] = channel["upper"].values
     std["bear"] = channel["bear"].values
     return std
@@ -117,6 +118,7 @@ def run_single(con, cohorts: list[int], end: str, pool_size: int, min_mv: float,
             df = load_window(con, code, y0, args_end[0])
             if df is not None:
                 loaded.append((code, y0, add_filter_variants(df)))
+    tables: dict[str, pd.DataFrame] = {}
     for label, col in variants.items():
         rows = []
         for code, y0, df in loaded:
@@ -125,9 +127,11 @@ def run_single(con, cohorts: list[int], end: str, pool_size: int, min_mv: float,
                 r["code"], r["cohort"] = code, y0
                 r.pop("trade_frame", None)
                 rows.append(r)
+        t = pd.DataFrame(rows)
+        if rows:
+            tables[label] = t
         if not rows:
             continue
-        t = pd.DataFrame(rows)
         print(f"\n=== 单票串行 · {label} · {len(cohorts)} 批 × {pool_size} 只 = {len(t)} 个独立账户 ===")
         print("  （每只票单独 100 万，一次只持一笔；收益不可跨票相加，看分布）")
         q = t.total_pct.quantile
@@ -144,6 +148,24 @@ def run_single(con, cohorts: list[int], end: str, pool_size: int, min_mv: float,
                 print(f"    {y0}年起做{len(sub):3d}只：中位累计 {sub.total_pct.median():+7.1f}%  "
                       f"中位年化 {sub.annualized.median():+6.1f}%  赚钱占比 {(sub.total_pct>0).mean()*100:3.0f}%  "
                       f"中位回撤 {sub.max_dd.median():6.1f}%  中位笔数 {sub.trades.median():4.0f}")
+    if SINGLE_OUT[0]:
+        keep = ["cohort", "code", "total_pct", "annualized", "max_dd", "trades", "win", "worst", "bars"]
+        merged = None
+        for label, t in tables.items():
+            tag = {"裸 CROSS(RSI6,40)": "裸", "裸+形态过滤": "形态", "定稿v2(位置+形态)": "v2"}[label]
+            sub = t[keep].rename(columns={c: f"{c}_{tag}" for c in keep if c not in ("cohort", "code")})
+            merged = sub if merged is None else merged.merge(sub, on=["cohort", "code"])
+        merged["起做"] = merged.cohort.astype(str) + "年初"
+        merged["年数"] = (merged.bars_裸 / 244).round(1)
+        merged = merged.sort_values("total_pct_裸", ascending=False)
+        cols = ["code", "起做", "年数", "total_pct_裸", "annualized_裸", "max_dd_裸", "trades_裸", "win_裸",
+                "worst_裸", "total_pct_形态", "total_pct_v2"]
+        merged[cols].rename(columns=dict(
+            code="代码", total_pct_裸="裸累计%", annualized_裸="裸年化%", max_dd_裸="裸最大回撤%",
+            trades_裸="裸笔数", win_裸="裸胜率%", worst_裸="最差单笔%",
+            total_pct_形态="加形态累计%", total_pct_v2="定稿v2累计%")).to_csv(
+            SINGLE_OUT[0], index=False, encoding="utf-8-sig")
+        print(f"\n逐票明细已导出：{SINGLE_OUT[0]}（{len(merged)} 行，按裸信号累计从高到低）")
 
 
 def make_pool(con, year: int, size: int, min_mv: float, max_mv: float) -> list[str]:
@@ -401,10 +423,12 @@ def main() -> int:
     ap.add_argument("--cohorts", type=int, nargs="*", default=[2018, 2020, 2022, 2024],
                     help="single 模式：从哪些年份各选一批票一直做到样本末")
     ap.add_argument("--end", default="20260903")
+    ap.add_argument("--single-out", help="single 模式：把逐票分布表导出成 CSV（按裸信号累计降序）")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
 
     if args.mode == "single":
+        SINGLE_OUT[0] = args.single_out
         con = sqlite3.connect(DB)
         try:
             run_single(con, args.cohorts, args.end, args.pool_size, args.min_mv, args.max_mv,
