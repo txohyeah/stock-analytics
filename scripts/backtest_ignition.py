@@ -17,6 +17,7 @@
     ./venv/bin/python scripts/backtest_ignition.py --start-year 2018 --end-year 2026
     ./venv/bin/python scripts/backtest_ignition.py --years 2018 2022 --variant both --trades-out /tmp/t.csv
     ./venv/bin/python scripts/backtest_ignition.py --start-year 2024 --frac 0.2 --slot 5
+    ./venv/bin/python scripts/backtest_ignition.py --ts-codes 000001.SZ,600519.SH --start-year 2024
 """
 
 from __future__ import annotations
@@ -392,6 +393,7 @@ def main() -> int:
     ap.add_argument("--end-year", type=int, default=2026)
     ap.add_argument("--years", type=int, nargs="*", help="只跑指定年份（覆盖 start/end）")
     ap.add_argument("--pool-size", type=int, default=60)
+    ap.add_argument("--ts-codes", help="固定股票池（逗号分隔）；仅用于快速验证，存在前视偏差")
     ap.add_argument("--min-mv", type=float, default=800000, help="流通市值下限（万元）")
     ap.add_argument("--max-mv", type=float, default=1e12)
     ap.add_argument("--frac", type=float, default=0.10, help="每笔占当时权益比例")
@@ -406,8 +408,11 @@ def main() -> int:
     ap.add_argument("--single-out", help="single 模式：把逐票分布表导出成 CSV（按裸信号累计降序）")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
+    fixed_pool = list(dict.fromkeys(code.strip() for code in (args.ts_codes or "").split(",") if code.strip()))
 
     if args.mode == "single":
+        if fixed_pool:
+            ap.error("--ts-codes 仅支持组合模式")
         SINGLE_OUT[0] = args.single_out
         con = sqlite3.connect(DB)
         try:
@@ -422,10 +427,12 @@ def main() -> int:
     labels = {"sig_v2": "定稿v2(含买入过滤)", "sig_bare": "裸CROSS(RSI6,40)"}
     con = sqlite3.connect(DB)
     out = {}
+    if fixed_pool and not args.json:
+        print(f"固定池快速验证：{len(fixed_pool)} 只；所有年度复用 2026 年选出的池，存在前视偏差，不能替代正式全市场回测。")
     for col in cols:
         rows = []
         for year in years:
-            pool = make_pool(con, year, args.pool_size, args.min_mv, args.max_mv)
+            pool = fixed_pool or make_pool(con, year, args.pool_size, args.min_mv, args.max_mv)
             if len(pool) < 10:
                 print(f"  {year} 池子只有 {len(pool)} 只，跳过（先跑 scripts/backfill_delisted_basic.py）")
                 continue

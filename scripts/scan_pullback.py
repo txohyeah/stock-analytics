@@ -2,17 +2,16 @@
 """趋势回踩起爆扫描 —— 只扫指定个股池（默认 = stocks 站点关注池），不做全市扫描。
 
 定位必须先说清楚（2026-09-06 口径）：
-  「趋势回踩起爆」四条件在无前视重建池上机械执行已被证伪（各卖法单票中位累计全负；
+  旧版「趋势回踩起爆」四条件在无前视重建池上机械执行已被证伪（各卖法单票中位累计全负；
   此前的优势经查全部来自金牛通道的未来函数，修复后因果口径仅 +0.18%/胜率 41.3%）。
   但在用户自选池（人工精选）上组合层复验年化 22.4%，与用户两年实盘自述吻合
-  —— edge 在选股、不在信号。因此本扫描器**不选股**，只替你盯你自己选的票；
-  票池一换结论就不成立，勿当全市选股器用。
+  —— edge 在选股、不在信号。当前三条件版移除了 60 日回撤门槛，尚未重新回测，
+  因此本扫描器**不选股**，只替你盯你自己选的票；票池一换结论就不成立，勿当全市选股器用。
 
-四条件（与 2026-09 设计稿一致，通道为因果口径 causal=True）：
-  1. RSI6 从下穿上 50                       —— 重新发力
-  2. 距 60 日最高回撤 −5% ~ −25%             —— 只是歇口气，不是崩盘
-  3. 当日成交量 ≥ 5 日均量 × 1.2             —— 真金白银，不是缩量假弹
-  4. 金牛通道非空头（确认线在生命线上方）      —— 长期上升结构没坏
+三条件（共享函数 `trend_pullback_signal_series`，通道为因果口径 causal=True）：
+  1. RSI6 从下穿上 40                       —— 重新发力
+  2. 当日成交量 ≥ 5 日均量 × 1.2，或最低价 ≤ 金牛趋势线 —— 放量或回踩支撑
+  3. 金牛通道非空头（确认线不在生命线上方）    —— 长期上升结构没坏
 
 「★重手」标记：现价距金牛上沿 ≥8%（历史加码期望显著更高的位置；用法是加码信号，
   不是筛选条件——当必要条件会滤掉约 80% 机会）。
@@ -42,13 +41,12 @@ from tech_indicators.ignition import (  # noqa: E402
     golden_channel_state,
     ignition_rsi,
     ignition_stop_line,
+    trend_pullback_signal_series,
 )
 
 DB = ROOT / "data" / "stock.db"
 BARS = 140                    # 预热：60日位置窗口 + 通道（因果版预热约24根）都够
 DEFAULT_POOL = ROOT / "data" / "watchlist_site.csv"   # sync_watchlist.py 的产物
-DD_LOW, DD_HIGH = -25.0, -5.0   # 距60日高点回撤区间（%）
-VOL5X_MIN = 1.2                 # 当日量 / 前5日均量 下限
 HEAVY_UPPER_PCT = 8.0           # 重手标记：距上沿 ≥8%
 
 
@@ -90,31 +88,23 @@ def load_bars(con, code: str) -> pd.DataFrame | None:
 
 
 def scan_one(df: pd.DataFrame, name: str, category: str) -> list[dict]:
-    """返回该票所有命中「趋势回踩起爆」四条件的交易日明细。"""
+    """返回该票所有命中「趋势回踩起爆」三条件的交易日明细。"""
     c = df.close.values
     lows = df.low.values
     rsi = ignition_rsi(df).values
-    prev_rsi = np.concatenate([[np.nan], rsi[:-1]])
-    dd60 = (c / pd.Series(df.high.values).rolling(60).max().values - 1) * 100
+    dd60 = (c / pd.Series(df.high.values).rolling(60).max().values - 1) * 100  # 仅展示，不参与信号
     vol5 = pd.Series(df.vol.values).rolling(5).mean().shift(1).values
     vol5x = df.vol.values / np.where(vol5 == 0, np.nan, vol5)
+    signal = trend_pullback_signal_series(df).values
     ch = golden_channel_state(df, causal=True)
     upper = ch["upper"].values
-    bear = ch["bear"].values
 
     out = []
     for i in range(len(df)):
-        if (np.isnan(dd60[i]) or np.isnan(rsi[i]) or np.isnan(prev_rsi[i])
-                or np.isnan(vol5x[i]) or not np.isfinite(upper[i])):
+        if (np.isnan(rsi[i]) or np.isnan(vol5x[i])
+                or not np.isfinite(upper[i])):
             continue                        # 预热不足，跳过这几根
-        cross50 = rsi[i] > 50 and prev_rsi[i] <= 50
-        if not cross50:
-            continue
-        if not (DD_LOW <= dd60[i] <= DD_HIGH):
-            continue
-        if vol5x[i] < VOL5X_MIN:
-            continue
-        if bool(bear[i]):                   # 空头通道中：长期结构坏了，不碰
+        if not signal[i]:
             continue
         stop = ignition_stop_line(float(c[i]), lows, i + 1)   # C2 兜底线：max(买价×0.90, 最近30根最低)
         to_upper = float((upper[i] / c[i] - 1) * 100)
