@@ -43,10 +43,12 @@ from tech_indicators.ignition import (  # noqa: E402
     ignition_position_filter,
     ignition_rsi,
 )
+from backtest_duanxian_volume import volume_confirm_signals  # noqa: E402
 
 DB = ROOT / "data" / "stock.db"
 BARS = 140          # 预热长度：60日位置窗口 + RSI/通道都要留够
 ADJ = "adj_factor"
+VOL_CONFIRM_WINDOW = 4   # 量能确认窗口：[t-3, t] 共 4 天，与回测 confirm 模式一致
 
 
 def latest_date(con) -> str:
@@ -101,6 +103,10 @@ def scan_one(df: pd.DataFrame, name: str, industry: str) -> list[dict]:
     upper = channel["upper"].values
     bear = channel["bear"].values
     prev_rsi = np.concatenate([[np.nan], rsi[:-1]])
+    # 量能确认（辅助，不参与信号判定）：量托 / OBV金叉，3 个交易日内（含当天）触发过即确认
+    vc = volume_confirm_signals(df)
+    liangtuo_win = vc["sig_liangtuo"].fillna(False).rolling(VOL_CONFIRM_WINDOW, min_periods=1).max().fillna(0).astype(bool).values
+    obv_win = vc["sig_obv"].fillna(False).rolling(VOL_CONFIRM_WINDOW, min_periods=1).max().fillna(0).astype(bool).values
     out = []
     for i in range(len(df)):
         if np.isnan(dd60[i]) or np.isnan(rsi[i]) or np.isnan(np.nanmean(amp)):
@@ -108,6 +114,8 @@ def scan_one(df: pd.DataFrame, name: str, industry: str) -> list[dict]:
         # 与回测/实盘同一套止损定义（库 ignition_stop_line，唯一实现）：
         # 明日检查用的滚动线 = max(买价×(1-10%), 截至今日的最近30根最低价)——窗口含今日（建仓根）、不含明日（检查根）
         stop = ignition_stop_line(float(closes[i]), df.low.values, i + 1)
+        liangtuo_ok = bool(liangtuo_win[i])
+        obv_ok = bool(obv_win[i])
         out.append(dict(
             trade_date=str(df.trade_date.iloc[i]), close=round(float(closes[i]), 2),
             stop=round(stop, 2), stop_pct=round((stop / float(closes[i]) - 1) * 100, 1),
@@ -120,6 +128,8 @@ def scan_one(df: pd.DataFrame, name: str, industry: str) -> list[dict]:
             vol_x=round(float(volx[i]), 2) if not np.isnan(volx[i]) else None,
             to_upper=round((float(upper[i]) / float(closes[i]) - 1) * 100, 1) if np.isfinite(upper[i]) else None,
             bear=bool(bear[i]), name=name, industry=industry, ts_code=None,
+            liangtuo_ok=liangtuo_ok, obv_ok=obv_ok,
+            vol_confirm=liangtuo_ok or obv_ok,
         ))
     return out
 
@@ -211,7 +221,8 @@ def main() -> int:
             position_ok="位置达标", candle_ok="形态干净", dd60="距60日高点%",
             off_low="距60日低点%", amp60="60日日均振幅%", vol_x="量/昨量",
             to_upper="距金牛上沿%", bear="熊市通道中", stop="止损价", stop_pct="距止损%",
-            cross="当日上穿", first_cross="首次上穿")).to_csv(args.csv, index=False, encoding="utf-8-sig")
+            cross="当日上穿", first_cross="首次上穿",
+            liangtuo_ok="量托确认", obv_ok="OBV金叉确认", vol_confirm="量能确认")).to_csv(args.csv, index=False, encoding="utf-8-sig")
         print(f"\n已导出全部 {len(hits)} 行 → {args.csv}")
 
     print(f"\n扫描日 {day}（回看 {args.days} 个交易日）｜全市场非ST已上市满一年：{len(uni)} 只，"
@@ -225,16 +236,20 @@ def main() -> int:
         ts_code="代码", name="名称", industry="行业", tier="档", close="收盘价", dd60="距60高%",
         off_low="距60低%", amp60="振幅%", vol_x="量/昨", to_upper="距上沿%", rsi="RSI6",
         stop="止损价", stop_pct="距止损%", pct_chg="涨幅%", signal_date="信号日",
-        position_ok="位置", candle_ok="形态", bear="熊道"))
+        position_ok="位置", candle_ok="形态", bear="熊道",
+        liangtuo_ok="量托", obv_ok="OBV", vol_confirm="量能确认"))
     cols = cols[["代码", "名称", "行业", "档", "收盘价", "止损价", "距止损%", "涨幅%", "RSI6",
-                 "距60高%", "距60低%", "振幅%", "量/昨", "距上沿%", "形态", "熊道"]]
+                 "距60高%", "距60低%", "振幅%", "量/昨", "距上沿%", "形态", "熊道",
+                 "量托", "OBV", "量能确认"]]
     pd.set_option("display.unicode.east_asian_width", True)
-    with pd.option_context("display.max_columns", None, "display.width", 200):
+    with pd.option_context("display.max_columns", None, "display.width", 220):
         print(cols.to_string(index=False))
     print("\n口径（2026-09-05 因果版定稿）：买入价=信号日收盘（当日涨幅>5% 则次日再买，不追）；"
           "「止损价」= max(买价×0.90, 最近30根最低价) 收盘触发、逐日滚动；"
           "盘中摸到金牛上沿但收盘收回下方（阴线或长上影）→ 全清（2026-09-05 实测优于减半）；"
-          "移动止盈默认关闭（组合层实测关闭更优）；熊道仅作参考，不再触发清仓。「距上沿%」是到清仓价的空间。")
+          "移动止盈默认关闭（组合层实测关闭更优）；熊道仅作参考，不再触发清仓。「距上沿%」是到清仓价的空间。"
+          "\n量能确认（辅助，不参与信号判定）：量托/OBV金叉在信号日及前 3 个交易日内触发过即打勾；"
+          "回测口径：超跌起爆+量能确认 278→162 笔(-42%)、f20 +8.01%→+10.03%，仅作仓位参考，不构成过滤。")
     return 0
 
 

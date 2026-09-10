@@ -43,11 +43,13 @@ from tech_indicators.ignition import (  # noqa: E402
     ignition_stop_line,
     trend_pullback_signal_series,
 )
+from backtest_duanxian_volume import volume_confirm_signals  # noqa: E402
 
 DB = ROOT / "data" / "stock.db"
 BARS = 140                    # 预热：60日位置窗口 + 通道（因果版预热约24根）都够
 DEFAULT_POOL = ROOT / "data" / "watchlist_site.csv"   # sync_watchlist.py 的产物
 HEAVY_UPPER_PCT = 8.0           # 重手标记：距上沿 ≥8%
+VOL_CONFIRM_WINDOW = 4          # 量能确认窗口：[t-3, t] 共 4 天，与回测 confirm 模式一致
 
 
 def latest_date(con) -> str:
@@ -98,6 +100,10 @@ def scan_one(df: pd.DataFrame, name: str, category: str) -> list[dict]:
     signal = trend_pullback_signal_series(df).values
     ch = golden_channel_state(df, causal=True)
     upper = ch["upper"].values
+    # 量能确认（辅助，不参与信号判定）：量托 / OBV金叉，3 个交易日内（含当天）触发过即确认
+    vc = volume_confirm_signals(df)
+    liangtuo_win = vc["sig_liangtuo"].fillna(False).rolling(VOL_CONFIRM_WINDOW, min_periods=1).max().fillna(0).astype(bool).values
+    obv_win = vc["sig_obv"].fillna(False).rolling(VOL_CONFIRM_WINDOW, min_periods=1).max().fillna(0).astype(bool).values
 
     out = []
     for i in range(len(df)):
@@ -108,6 +114,8 @@ def scan_one(df: pd.DataFrame, name: str, category: str) -> list[dict]:
             continue
         stop = ignition_stop_line(float(c[i]), lows, i + 1)   # C2 兜底线：max(买价×0.90, 最近30根最低)
         to_upper = float((upper[i] / c[i] - 1) * 100)
+        liangtuo_ok = bool(liangtuo_win[i])
+        obv_ok = bool(obv_win[i])
         out.append(dict(
             trade_date=str(df.trade_date.iloc[i]), close=round(float(c[i]), 2),
             pct_chg=round(float(df.pct_chg.values[i]), 2), rsi=round(float(rsi[i]), 1),
@@ -116,6 +124,8 @@ def scan_one(df: pd.DataFrame, name: str, category: str) -> list[dict]:
             stop=round(stop, 2), stop_pct=round((stop / c[i] - 1) * 100, 1),
             heavy=bool(to_upper >= HEAVY_UPPER_PCT),
             name=name, category=category,
+            liangtuo_ok=liangtuo_ok, obv_ok=obv_ok,
+            vol_confirm=liangtuo_ok or obv_ok,
         ))
     return out
 
@@ -179,6 +189,7 @@ def main() -> int:
             ts_code="代码", name="名称", category="分类", trade_date="信号日", close="收盘价",
             stop="参考止损", stop_pct="距止损%", pct_chg="当日涨幅%", rsi="RSI6",
             dd60="距60日高点%", vol5x="量/5日均", to_upper="距上沿%", heavy="重手",
+            liangtuo_ok="量托确认", obv_ok="OBV金叉确认", vol_confirm="量能确认",
         )).to_csv(args.csv, index=False, encoding="utf-8-sig")
         print(f"\n已导出 {len(hits)} 行 → {args.csv}")
 
@@ -188,16 +199,22 @@ def main() -> int:
     cols = hits.head(args.limit).rename(columns=dict(
         ts_code="代码", name="名称", category="分类", trade_date="信号日", close="收盘价",
         stop="参考止损", stop_pct="距止损%", pct_chg="涨幅%", rsi="RSI6",
-        dd60="距60高%", vol5x="量/5均", to_upper="距上沿%", heavy="重手"))
+        dd60="距60高%", vol5x="量/5均", to_upper="距上沿%", heavy="重手",
+        liangtuo_ok="量托", obv_ok="OBV", vol_confirm="量能确认"))
     cols["重手"] = cols["重手"].map(lambda x: "★" if x else "")
+    cols["量托"] = cols["量托"].map(lambda x: "✓" if x else "")
+    cols["OBV"] = cols["OBV"].map(lambda x: "✓" if x else "")
+    cols["量能确认"] = cols["量能确认"].map(lambda x: "✓" if x else "")
     pd.set_option("display.unicode.east_asian_width", True)
-    with pd.option_context("display.max_columns", None, "display.width", 220):
+    with pd.option_context("display.max_columns", None, "display.width", 240):
         print(cols[["信号日", "代码", "名称", "分类", "收盘价", "参考止损", "距止损%",
-                    "涨幅%", "RSI6", "距60高%", "量/5均", "距上沿%", "重手"]].to_string(index=False))
+                    "涨幅%", "RSI6", "距60高%", "量/5均", "距上沿%", "重手",
+                    "量托", "OBV", "量能确认"]].to_string(index=False))
     print("\n口径（2026-09-06）：买入价=信号日收盘（当日涨幅>5% 则次日再买，不追）；"
           "「参考止损」= max(买价×0.90, 最近30根最低价) 收盘触发、逐日滚动（C2 兜底线）；"
           "主出场=盘中摸金牛上沿、收盘收回下方（阴线或长上影）→ 清仓，故「距上沿%」是到清仓价的空间；"
           "空头通道中的票直接不列（长期结构坏）。"
+          "\n量能确认（辅助，不参与信号判定）：量托/OBV金叉在信号日及前 3 个交易日内触发过即打勾，仅作仓位参考。"
           "\n提醒：本扫描器只盯关注池、不选股；机械执行在无前视池已证伪，edge 在你的选股。")
     return 0
 
