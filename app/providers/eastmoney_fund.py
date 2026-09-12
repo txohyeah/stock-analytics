@@ -135,7 +135,12 @@ def fetch_fund_holdings(fund_code: str, year: int, month: int) -> pd.DataFrame:
     Returns:
         DataFrame[fund_code, ts_code, name, end_date, rank, hold_ratio, hold_vol, hold_amount]
         无数据时返回空 DataFrame。
+
+    注意：fund_code 必须为纯数字（如 '110022'）。若传入 '110022.OF' 等带后缀
+    代码，接口会返回默认响应（多只基金返回完全相同数据，实测 2026-09-12），
+    因此这里强制剥离 .OF 后缀。
     """
+    fund_code = str(fund_code).split(".")[0]
     params = {
         "type": "jjcc",
         "code": fund_code,
