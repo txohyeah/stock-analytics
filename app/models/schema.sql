@@ -709,3 +709,78 @@ CREATE TABLE IF NOT EXISTS cashflow (
   KEY idx_cashflow_ann_date (ann_date),
   KEY idx_cashflow_end_date (end_date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ============================================================
+-- 三路聪明钱跟踪（2026-09-12 新增）
+-- 本地 sqlite 由 upsert_dataframe 自动建表；本文件为 MySQL 部署参考
+-- ============================================================
+
+-- 前十大股东（社保/汇金/养老金/公募都在这里）
+CREATE TABLE IF NOT EXISTS top10_holders (
+  ts_code VARCHAR(16) NOT NULL,
+  ann_date VARCHAR(16) NULL,
+  end_date VARCHAR(16) NOT NULL,
+  holder_name VARCHAR(128) NOT NULL,
+  hold_amount DECIMAL(24,4) NULL,
+  hold_ratio DECIMAL(12,4) NULL,
+  hold_float_ratio DECIMAL(12,4) NULL,
+  hold_change DECIMAL(24,4) NULL,
+  holder_type VARCHAR(32) NULL,
+  PRIMARY KEY (ts_code, end_date, ann_date, holder_name),
+  KEY idx_top10_holders_end (end_date),
+  KEY idx_top10_holders_name (holder_name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 前十大流通股东
+CREATE TABLE IF NOT EXISTS top10_floatholders (
+  ts_code VARCHAR(16) NOT NULL,
+  ann_date VARCHAR(16) NULL,
+  end_date VARCHAR(16) NOT NULL,
+  holder_name VARCHAR(128) NOT NULL,
+  hold_amount DECIMAL(24,4) NULL,
+  hold_ratio DECIMAL(12,4) NULL,
+  hold_float_ratio DECIMAL(12,4) NULL,
+  hold_change DECIMAL(24,4) NULL,
+  holder_type VARCHAR(32) NULL,
+  PRIMARY KEY (ts_code, end_date, ann_date, holder_name),
+  KEY idx_top10_floatholders_end (end_date),
+  KEY idx_top10_floatholders_name (holder_name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 基金列表（tushare fund_basic，market='O'）
+CREATE TABLE IF NOT EXISTS fund_basic (
+  ts_code VARCHAR(16) PRIMARY KEY,
+  name VARCHAR(128) NULL,
+  management VARCHAR(128) NULL,
+  custodian VARCHAR(128) NULL,
+  fund_type VARCHAR(32) NULL,
+  found_date VARCHAR(16) NULL,
+  list_date VARCHAR(16) NULL,
+  delist_date VARCHAR(16) NULL,
+  issue_amount DECIMAL(24,4) NULL,
+  m_fee DECIMAL(12,4) NULL,
+  c_fee DECIMAL(12,4) NULL,
+  duration_year DECIMAL(12,4) NULL,
+  p_value DECIMAL(12,4) NULL,
+  min_amount DECIMAL(12,4) NULL,
+  exp_return DECIMAL(12,4) NULL,
+  benchmark VARCHAR(255) NULL,
+  status VARCHAR(8) NULL,
+  invest_type VARCHAR(32) NULL,
+  type VARCHAR(32) NULL,
+  market VARCHAR(8) NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 基金前十大重仓股（天天基金爬虫）
+CREATE TABLE IF NOT EXISTS fund_holdings (
+  fund_code VARCHAR(16) NOT NULL,
+  ts_code VARCHAR(16) NOT NULL,
+  end_date VARCHAR(16) NOT NULL,
+  rank INT NULL,
+  hold_ratio DECIMAL(12,4) NULL,
+  hold_vol DECIMAL(24,4) NULL,
+  hold_amount DECIMAL(24,4) NULL,
+  PRIMARY KEY (fund_code, ts_code, end_date),
+  KEY idx_fund_holdings_end (end_date),
+  KEY idx_fund_holdings_stock (ts_code)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

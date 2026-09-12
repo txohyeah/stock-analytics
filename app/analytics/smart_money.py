@@ -1,0 +1,259 @@
+"""三路聪明钱市场大方向分析（社保 / 公募 / 国家队）。
+
+数据来源：
+- fund_holdings（天天基金爬虫）：公募主动权益基金前十大重仓股
+- top10_holders / top10_floatholders（tushare）：社保/汇金/养老金股东明细
+- stock_basic.industry（东财行业）：行业映射
+
+设计见 specs/smart-money-tracking.md。
+注意：前十大重仓股聚合是"近似行业配置"（季报只披露前十大，约占仓位 50-70%），
+报告输出必须标注该近似性。
+"""
+from __future__ import annotations
+
+import logging
+import sqlite3
+
+import pandas as pd
+
+logger = logging.getLogger(__name__)
+
+
+def _query(conn, sql: str, params: tuple = ()) -> list:
+    """执行 SQL 返回行列表（兼容 sqlite3.Connection）。
+
+    表不存在时返回空列表（如尚未同步 top10_holders / fund_holdings），
+    使报告优雅降级而非报错。
+    """
+    try:
+        return conn.execute(sql, params).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):
+            logger.warning("table missing, skip query: %s", str(exc))
+            return []
+        raise
+
+# 聪明钱关键词（holder_name 匹配）
+_SOCIAL_SECURITY = "%社保%"
+_HUIJIN = "%汇金%"
+_PENSION = "%养老%"
+
+
+def _industry_map(conn) -> dict[str, str]:
+    """ts_code → 东财行业 映射。"""
+    rows = _query(conn, "SELECT ts_code, industry FROM stock_basic WHERE industry IS NOT NULL")
+    return {r[0]: r[1] for r in rows}
+
+
+def industry_allocation(conn, end_date: str) -> pd.DataFrame:
+    """公募行业配置：fund_holdings 按行业聚合（持仓市值加权）。
+
+    大白话：把全市场主动权益基金的前十大重仓股，按股票所属行业加总市值，
+    算出每个行业占公募总持仓的比例——这就是"公募在买什么方向"。
+    """
+    rows = _query(conn, 
+        """
+        SELECT f.ts_code, f.hold_amount
+        FROM fund_holdings f
+        WHERE f.end_date = ? AND f.hold_amount IS NOT NULL
+        """,
+        (end_date,),
+    )
+    if not rows:
+        return pd.DataFrame(columns=["industry", "amount", "ratio"])
+    industry_map = _industry_map(conn)
+    df = pd.DataFrame(rows, columns=["ts_code", "hold_amount"])
+    df["industry"] = df["ts_code"].map(industry_map).fillna("未分类")
+    grouped = df.groupby("industry")["hold_amount"].sum().sort_values(ascending=False)
+    total = grouped.sum()
+    result = pd.DataFrame({"amount": grouped, "ratio": grouped / total})
+    result = result.reset_index().rename(columns={"index": "industry"})
+    return result
+
+
+def concentration(conn, end_date: str) -> dict:
+    """抱团集中度：CR10（前十大重仓股市值占比）、行业集中度、HHI。
+
+    大白话：
+    - CR10：公募最爱的 10 只股票占全部持仓的比例——越高说明越抱团
+    - 行业集中度：前 3 大行业占比合计
+    - HHI：行业占比平方和，>0.25 视为高度集中（一家独大）
+    """
+    rows = _query(conn, 
+        """
+        SELECT ts_code, hold_amount FROM fund_holdings
+        WHERE end_date = ? AND hold_amount IS NOT NULL
+        """,
+        (end_date,),
+    )
+    if not rows:
+        return {"cr10": None, "top3_industry": None, "hhi": None}
+    df = pd.DataFrame(rows, columns=["ts_code", "hold_amount"])
+    total = df["hold_amount"].sum()
+    # CR10
+    top10 = df.groupby("ts_code")["hold_amount"].sum().nlargest(10).sum()
+    cr10 = top10 / total if total else None
+    # 行业集中度 + HHI
+    industry_map = _industry_map(conn)
+    df["industry"] = df["ts_code"].map(industry_map).fillna("未分类")
+    ind_ratio = df.groupby("industry")["hold_amount"].sum() / total
+    top3 = ind_ratio.nlargest(3).sum()
+    hhi = (ind_ratio**2).sum()
+    return {"cr10": cr10, "top3_industry": top3, "hhi": hhi}
+
+
+def top_holdings_change(conn, end_date: str, prev_date: str) -> dict:
+    """公募重仓股换血：本季度 vs 上季度，前十大重仓股的新进/退出。
+
+    大白话：公募整体最爱的 10 只股票，这个季度换了谁进来、谁被挤出去。
+    """
+    def top10(d: str) -> set[str]:
+        rows = _query(conn, 
+            """
+            SELECT ts_code, SUM(hold_amount) AS amt FROM fund_holdings
+            WHERE end_date = ? AND hold_amount IS NOT NULL
+            GROUP BY ts_code ORDER BY amt DESC LIMIT 10
+            """,
+            (d,),
+        )
+        return {r[0] for r in rows}
+
+    cur = top10(end_date)
+    prev = top10(prev_date) if prev_date else set()
+    # 名称映射（从 stock_basic 全量取一次）
+    names = {r[0]: r[1] for r in _query(conn, "SELECT ts_code, name FROM stock_basic")}
+    return {
+        "new_entries": [(c, names.get(c, c)) for c in sorted(cur - prev)],
+        "exits": [(c, names.get(c, c)) for c in sorted(prev - cur)],
+        "current_top10": [(c, names.get(c, c)) for c in sorted(cur)],
+    }
+
+
+def smart_money_flow(conn, end_date: str, prev_date: str | None = None) -> dict:
+    """社保/汇金/养老金：行业分布 + 增减持（top10_holders 全量明细）。
+
+    大白话：国家队/社保直接持有的股票，按行业加总**市值**，看钱往哪个行业走；
+    再对比相邻季度，看具体增持/减持了多少股。
+
+    注意：top10_holders.hold_amount 是持股**股数**（不是市值），
+    行业分布需乘最新收盘价换算成市值；增减持则看股数变化（原值相减）。
+    """
+    latest_date = _query(conn, "SELECT MAX(trade_date) FROM daily")
+    latest_date = latest_date[0][0] if latest_date else None
+    industry_map = _industry_map(conn)
+    names = {r[0]: r[1] for r in _query(conn, "SELECT ts_code, name FROM stock_basic")}
+
+    def holders_for(d: str) -> pd.DataFrame:
+        rows = _query(conn, 
+            """
+            SELECT h.ts_code, h.holder_name, h.hold_amount AS hold_shares,
+                   h.hold_amount * d.close AS hold_amount, h.hold_ratio
+            FROM top10_holders h
+            JOIN stock_basic s ON h.ts_code = s.ts_code
+            LEFT JOIN daily d ON h.ts_code = d.ts_code AND d.trade_date = ?
+            WHERE h.end_date = ? AND s.industry IS NOT NULL
+            """,
+            (latest_date, d),
+        )
+        if not rows:
+            return pd.DataFrame(columns=["ts_code", "holder_name", "hold_shares", "hold_amount", "hold_ratio"])
+        df = pd.DataFrame(rows, columns=["ts_code", "holder_name", "hold_shares", "hold_amount", "hold_ratio"])
+        mask = df["holder_name"].str.contains("社保|汇金|养老", na=False)
+        return df[mask]
+
+    cur = holders_for(end_date)
+    if cur.empty:
+        return {"industry": pd.DataFrame(), "changes": []}
+
+    # 行业分布
+    cur = cur.copy()
+    cur["industry"] = cur["ts_code"].map(industry_map).fillna("未分类")
+    ind = cur.groupby("industry")["hold_amount"].sum().sort_values(ascending=False)
+    ind_df = pd.DataFrame({"amount": ind, "ratio": ind / ind.sum()}).reset_index()
+
+    # 增减持（对比相邻季度，同 holder_name + ts_code）
+    changes: list[dict] = []
+    if prev_date:
+        prev = holders_for(prev_date)
+        if not prev.empty:
+            merged = cur.merge(
+                prev,
+                on=["ts_code", "holder_name"],
+                how="outer",
+                suffixes=("_cur", "_prev"),
+            )
+            merged["delta"] = merged["hold_shares_cur"].fillna(0) - merged["hold_shares_prev"].fillna(0)
+            moved = merged[merged["delta"].abs() > 0].copy()
+            moved["name"] = moved["ts_code"].map(names)
+            moved = moved.sort_values("delta", ascending=False)
+            changes = [
+                {
+                    "ts_code": r.ts_code,
+                    "name": r.name,
+                    "holder": r.holder_name,
+                    "delta": r.delta,
+                }
+                for r in moved.itertuples()
+            ]
+    return {"industry": ind_df, "changes": changes}
+
+
+def report(conn, end_date: str, prev_date: str | None = None) -> str:
+    """季度《聪明钱市场大方向报告》文本输出。"""
+    lines: list[str] = []
+    lines.append(f"===== 聪明钱市场大方向报告（{end_date}）=====")
+    lines.append("（数据口径：公募=主动权益基金前十大重仓股聚合，为近似行业配置，非全仓精确值）")
+    lines.append("")
+
+    # 1. 公募行业配置
+    ind = industry_allocation(conn, end_date)
+    if not ind.empty:
+        lines.append("【1】公募行业配置（持仓市值加权）")
+        lines.append(ind.head(10).to_string(index=False))
+        lines.append("")
+
+    # 2. 抱团集中度
+    conc = concentration(conn, end_date)
+    if conc["cr10"] is not None:
+        lines.append("【2】抱团集中度")
+        lines.append(
+            f"  CR10（前十大重仓股占比）: {conc['cr10']:.1%}"
+            f"  | 前3大行业占比: {conc['top3_industry']:.1%}"
+            f"  | HHI: {conc['hhi']:.3f}（>0.25 高度集中）"
+        )
+        lines.append("")
+
+    # 3. 重仓股换血
+    if prev_date:
+        chg = top_holdings_change(conn, end_date, prev_date)
+        lines.append(f"【3】公募重仓股换血（{prev_date} → {end_date}）")
+        lines.append(f"  新进前十: {', '.join(n for _, n in chg['new_entries']) or '无'}")
+        lines.append(f"  退出前十: {', '.join(n for _, n in chg['exits']) or '无'}")
+        lines.append("")
+
+    # 4. 社保/汇金
+    flow = smart_money_flow(conn, end_date, prev_date)
+    if not flow["industry"].empty:
+        lines.append("【4】社保/汇金/养老金行业分布（直接持股，按市值聚合，单位亿元）")
+        ind_view = flow["industry"].head(8).copy()
+        ind_view["市值(亿)"] = (ind_view["amount"] / 1e8).round(1)
+        ind_view["占比"] = (ind_view["ratio"] * 100).round(2).astype(str) + "%"
+        lines.append(ind_view[["industry", "市值(亿)", "占比"]].to_string(index=False))
+        if flow["changes"]:
+            lines.append(f"  增减持 TOP5（{prev_date} → {end_date}，单位：万股）:")
+            for c in flow["changes"][:5]:
+                lines.append(f"    {c['name']}({c['ts_code']}) {c['holder']}: {c['delta'] / 1e4:+,.0f} 万股")
+        lines.append("")
+
+    # 5. 结论段（自动生成）
+    lines.append("【5】结论")
+    if not ind.empty:
+        top_ind = ind.iloc[0]
+        lines.append(
+            f"  公募资金最集中的方向是「{top_ind['industry']}」（占 {top_ind['ratio']:.1%}）。"
+        )
+        if conc["hhi"] is not None and conc["hhi"] > 0.25:
+            lines.append("  行业集中度 HHI 偏高，抱团明显——拥挤度风险需警惕，止盈纪律优先。")
+        else:
+            lines.append("  行业集中度尚可，抱团风险相对可控。")
+    return "\n".join(lines)

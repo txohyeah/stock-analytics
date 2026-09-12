@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import logging
+import time
 from typing import Callable, Iterable
 
 import pandas as pd
@@ -317,6 +318,85 @@ def sync_index_basic(ctx: SyncContext, dataset: Dataset, start_date: str, end_da
     return fetched, affected
 
 
+def sync_by_period_paged(ctx: SyncContext, dataset: Dataset, start_date: str, end_date: str, ts_code: str | None) -> tuple[int, int]:
+    """top10_holders/top10_floatholders：period=end_date 全市场分页拉。
+
+    实测 6000 行/批，全市场约 10 批，6 秒完成（2026-09-12 验证，
+    与三大报表必须逐股拉不同，股东表支持按 period 全市场查询）。
+    """
+    del start_date, ts_code
+    period = end_date or today_yyyymmdd()
+    fetched = 0
+    affected = 0
+    offset = 0
+    while True:
+        frame = ctx.client.query(dataset.api_name, period=period, offset=offset, limit=6000)
+        fetched += len(frame)
+        affected += upsert(ctx, dataset, frame)
+        if len(frame) < 6000:
+            break
+        offset += 6000
+    return fetched, affected
+
+
+def sync_fund_holdings(ctx: SyncContext, dataset: Dataset, start_date: str, end_date: str, ts_code: str | None) -> tuple[int, int]:
+    """天天基金爬虫：主动权益基金前十大重仓股（市场大方向分析用）。
+
+    数据流：fund_basic（tushare）→ 筛选主动权益 → 逐只爬 fundf10 → 幂等 upsert。
+    筛选规则（实测 3129 只，2026-09-12）：
+      fund_type in (混合型, 股票型)
+      剔除 name 含 指数/ETF/联接/QDII
+      剔除 name 以 C/E 结尾（份额类别，同持仓只留 A）
+    每只基金一次请求返回最近 4 个季度（provider 内部处理，year/month 参数被接口忽略）。
+    限速 2 req/s；断点续爬：已存在该基金任何季度数据的跳过。
+    """
+    del start_date, ts_code
+    from app.providers.eastmoney_fund import fetch_fund_holdings
+
+    funds = ctx.store.query(
+        "SELECT ts_code, name FROM fund_basic "
+        "WHERE fund_type IN ('混合型', '股票型') "
+        "AND name NOT LIKE '%指数%' AND name NOT LIKE '%ETF%' "
+        "AND name NOT LIKE '%联接%' AND name NOT LIKE '%QDII%' "
+        "AND name NOT LIKE '%C' AND name NOT LIKE '%E' "
+        "ORDER BY ts_code"
+    )
+    if not funds:
+        raise RuntimeError("fund_basic 为空或筛选后无基金。先执行: sync fund_basic")
+
+    # 断点续爬：已爬过的基金跳过
+    done = {
+        row[0]
+        for row in ctx.store.query("SELECT DISTINCT fund_code FROM fund_holdings")
+    }
+
+    fetched = 0
+    affected = 0
+    skipped = 0
+    failed: list[str] = []
+    for fund_code, fund_name in funds:
+        if fund_code in done:
+            skipped += 1
+            continue
+        try:
+            frame = fetch_fund_holdings(fund_code, 2025, 12)
+        except Exception as exc:  # noqa: BLE001 - 单只失败不中断，记录后继续
+            failed.append(f"{fund_code}: {exc}")
+            logger.warning("fund_holdings %s failed: %s", fund_code, exc)
+            continue
+        if frame.empty:
+            skipped += 1
+            continue
+        fetched += len(frame)
+        affected += upsert(ctx, dataset, frame)
+        time.sleep(0.5)  # 限速 2 req/s
+        if (fetched + skipped) % 200 == 0:
+            logger.info("fund_holdings progress: fetched=%s skipped=%s failed=%s", fetched, skipped, len(failed))
+    if failed:
+        logger.warning("fund_holdings %d 只失败: %s", len(failed), "; ".join(failed[:10]))
+    return fetched, affected
+
+
 STRATEGIES: dict[str, SyncFunction] = {
     "basic": sync_single_call,
     "date_range": sync_single_call,
@@ -325,6 +405,8 @@ STRATEGIES: dict[str, SyncFunction] = {
     "stock_no_date": sync_by_stock_no_date,
     "trade_cal": sync_trade_cal,
     "index_basic": sync_index_basic,
+    "holders": sync_by_period_paged,
+    "fund_holdings": sync_fund_holdings,
 }
 
 

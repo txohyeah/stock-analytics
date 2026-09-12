@@ -381,6 +381,28 @@ def add_analytics_subparsers(sub) -> None:
     _db_arg(chart_parser)
     chart_parser.set_defaults(func=_chart, _json=True)
 
+    sm_parser = sub.add_parser("smart-money", help="三路聪明钱市场大方向报告（社保/公募/国家队）")
+    _db_arg(sm_parser)
+    sm_parser.add_argument("--end", required=True, help="报告期 YYYYMMDD，如 20250630")
+    sm_parser.add_argument("--prev", help="对比上期 YYYYMMDD，如 20250331（缺省自动取上一季度）")
+    sm_parser.set_defaults(func=_smart_money)
+
+
+def _smart_money(args: argparse.Namespace) -> int:
+    from .smart_money import report
+
+    repository = _stock_repository(args.database)
+    prev = args.prev
+    if not prev:
+        # 缺省取上一季度末
+        y, m = int(args.end[:4]), int(args.end[4:6])
+        q_end = {"03": "1231", "06": "0331", "09": "0630", "12": "0930"}
+        prev = f"{y - 1 if m == 3 else y}{q_end[args.end[4:6]]}"
+    with repository._connect() as conn:
+        text = report(conn, args.end, prev)
+    print(text)
+    return 0
+
 
 def _print_ok(payload: dict[str, object]) -> int:
     payload.setdefault("ok", True)

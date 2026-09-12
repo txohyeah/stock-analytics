@@ -47,6 +47,39 @@ DATASETS: dict[str, Dataset] = {
     "top_list": Dataset("top_list", "top_list", "top_list", ("trade_date", "ts_code"), "trade_date"),
     # 上市公司资料（主营/省份等，lhb 细分链归类用；basic 策略=单次全量拉取，需 2000 积分档）
     "stock_company": Dataset("stock_company", "stock_company", "stock_company", ("ts_code",), "basic"),
+    # 三路聪明钱跟踪（2026-09-12 新增，见 specs/smart-money-tracking.md）
+    # 前十大股东/流通股东：社保/汇金/养老金/公募都在这里；holders 策略=按 period 全市场分页拉
+    "top10_holders": Dataset(
+        "top10_holders",
+        "top10_holders",
+        "top10_holders",
+        ("ts_code", "end_date", "ann_date", "holder_name"),
+        "holders",
+    ),
+    "top10_floatholders": Dataset(
+        "top10_floatholders",
+        "top10_floatholders",
+        "top10_floatholders",
+        ("ts_code", "end_date", "ann_date", "holder_name"),
+        "holders",
+    ),
+    # 基金列表（场外，market='O'；主动权益筛选在 sync_fund_holdings 内做）
+    "fund_basic": Dataset(
+        "fund_basic",
+        "fund_basic",
+        "fund_basic",
+        ("ts_code",),
+        "basic",
+        {"market": "O", "status": "L"},
+    ),
+    # 基金前十大重仓股（天天基金爬虫，fund_holdings 策略）
+    "fund_holdings": Dataset(
+        "fund_holdings",
+        "",
+        "fund_holdings",
+        ("fund_code", "ts_code", "end_date"),
+        "fund_holdings",
+    ),
 }
 
 BOOTSTRAP_ORDER = ("trade_cal", "stock_basic")
