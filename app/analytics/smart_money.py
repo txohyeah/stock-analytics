@@ -302,60 +302,33 @@ def report(conn, end_date: str, prev_date: str | None = None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# HTML 报告（内置模板，纯 Python 渲染，无 jinja2 依赖）
+# HTML 报告（stocks-site 风格：复用 /assets/style.css + theme.js，无外部依赖）
 # ---------------------------------------------------------------------------
 
 _HTML_CSS = """
-:root{--bg:#f6f7f9;--card:#fff;--tx:#1a1f26;--mut:#5b6472;--acc:#2563eb;
-      --up:#16a34a;--down:#e74c3c;--line:#e5e8ec;--warn:#d97706}
-@media(prefers-color-scheme:dark){:root{--bg:#12161c;--card:#1b2129;--tx:#e6e9ee;
-      --mut:#98a1ad;--acc:#60a5fa;--up:#4ade80;--down:#f87171;--line:#2a323d}}
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--tx);
-     font:15px/1.75 -apple-system,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
-     padding:28px 14px}
-main{max-width:760px;margin:0 auto}
-header{background:linear-gradient(135deg,#1e3a5f,#2563eb);border-radius:14px;
-       padding:22px 26px;color:#fff;margin-bottom:18px}
-header h1{font-size:22px;font-weight:700;letter-spacing:.5px}
-header .sub{opacity:.85;font-size:13px;margin-top:4px}
-.kpis{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px}
-.kpi{flex:1;min-width:130px;background:var(--card);border:1px solid var(--line);
-     border-radius:12px;padding:12px 16px}
-.kpi b{display:block;color:var(--mut);font-weight:500;font-size:12px;
-       letter-spacing:.5px;margin-bottom:4px}
-.kpi span{font-size:20px;font-weight:700}
-.kpi .warn{color:var(--warn)}
-.kpi .ok{color:var(--up)}
-section{margin-top:22px}
-h2{font-size:15px;font-weight:600;color:var(--acc);margin-bottom:10px;
-   letter-spacing:1px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:12px;
-      padding:14px 18px;margin-bottom:12px}
-table{width:100%;border-collapse:collapse;font-size:14px}
-th{color:var(--mut);font-weight:500;font-size:12px;text-align:left;
-   padding:6px 8px;border-bottom:1px solid var(--line);letter-spacing:.5px}
-td{padding:7px 8px;border-bottom:1px solid var(--line)}
-tr:last-child td{border-bottom:none}
-td.num{text-align:right;font-variant-numeric:tabular-nums}
-.bar{display:inline-block;width:90px;height:8px;background:var(--line);
-     border-radius:4px;vertical-align:middle;margin-right:8px;overflow:hidden}
-.bar i{display:block;height:100%;background:var(--acc);border-radius:4px}
-.two{display:flex;gap:16px;flex-wrap:wrap}
-.two>div{flex:1;min-width:220px}
-h3{font-size:13px;font-weight:600;color:var(--mut);margin-bottom:8px;
-   letter-spacing:.5px}
-ul{list-style:none}
-li{padding:4px 0;font-size:14px}
-.up{color:var(--up)} .down{color:var(--down)}
-.conclusion{background:linear-gradient(135deg,#fef3c7,#fde68a);
-            border:1px solid #f59e0b;border-radius:12px;padding:16px 20px;
-            margin-top:22px;font-size:15px;line-height:1.9}
-@media(prefers-color-scheme:dark){.conclusion{background:#3a2f12;border-color:#b45309}}
-.conclusion b{color:#92400e}
-@media(prefers-color-scheme:dark){.conclusion b{color:#fbbf24}}
-footer{margin-top:26px;padding-top:12px;border-top:1px solid var(--line);
-       color:var(--mut);font-size:12px;line-height:1.8}
+.sm-kpis{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px}
+.sm-kpi{flex:1;min-width:150px;background:var(--panel);border:1px solid var(--border);
+        border-radius:12px;padding:14px 18px}
+.sm-kpi b{display:block;color:var(--muted);font-weight:500;font-size:12px;
+          letter-spacing:.5px;margin-bottom:4px}
+.sm-kpi span{font-size:22px;font-weight:700}
+.sm-kpi .warn{color:var(--yellow)} .sm-kpi .ok{color:var(--green)}
+.sm-bar{display:inline-block;width:90px;height:8px;background:var(--panel2);
+        border-radius:4px;vertical-align:middle;margin-right:8px;overflow:hidden}
+.sm-bar i{display:block;height:100%;background:var(--accent);border-radius:4px}
+.sm-two{display:flex;gap:16px;flex-wrap:wrap}
+.sm-two>div{flex:1;min-width:240px}
+.sm-up{color:var(--green)} .sm-down{color:var(--red)}
+.sm-conclusion{background:rgba(210,153,34,.12);border:1px solid rgba(210,153,34,.4);
+               border-radius:12px;padding:16px 20px;margin-top:20px;
+               font-size:15px;line-height:1.9}
+.sm-conclusion b{color:var(--yellow)}
+.sm-note{color:var(--muted);font-size:12px;margin-top:14px;line-height:1.8}
+.sm-section{margin-top:22px}
+.sm-section h3{font-size:15px;font-weight:600;color:var(--accent);margin-bottom:10px;
+               letter-spacing:1px}
+.sm-section ul{list-style:none}
+.sm-section li{padding:4px 0;font-size:14px}
 """
 
 
@@ -365,10 +338,10 @@ def _esc(s) -> str:
 
 
 def report_html(conn, end_date: str, prev_date: str | None = None) -> str:
-    """季度《聪明钱市场大方向报告》HTML 页面（内置模板，无外部依赖）。
+    """季度《聪明钱市场大方向报告》HTML 页面（stocks-site 风格，复用站点样式）。
 
     结构：指标卡（CR10/前3行业/HHI）→ 公募行业配置（占比条）→ QoQ 变化 →
-    重仓股换血 → 社保/汇金分布 → 结论高亮。
+    重仓股换血 → 社保/汇金分布 → 结论高亮。部署到 stocks-site 的 /smart-money。
     """
     ind = industry_allocation(conn, end_date)
     conc = concentration(conn, end_date)
@@ -381,10 +354,10 @@ def report_html(conn, end_date: str, prev_date: str | None = None) -> str:
         top3_cls = "warn" if conc["top3_industry"] and conc["top3_industry"] > 0.5 else "ok"
         hhi_cls = "warn" if conc["hhi"] and conc["hhi"] > 0.25 else "ok"
         kpi_html = f"""
-<div class="kpis">
-  <div class="kpi"><b>CR10 · 前十大重仓股占比</b><span>{conc['cr10']:.1%}</span></div>
-  <div class="kpi"><b>前3大行业占比</b><span class="{top3_cls}">{conc['top3_industry']:.1%}</span></div>
-  <div class="kpi"><b>HHI 行业集中度</b><span class="{hhi_cls}">{conc['hhi']:.3f}</span></div>
+<div class="sm-kpis">
+  <div class="sm-kpi"><b>CR10 · 前十大重仓股占比</b><span>{conc['cr10']:.1%}</span></div>
+  <div class="sm-kpi"><b>前3大行业占比</b><span class="{top3_cls}">{conc['top3_industry']:.1%}</span></div>
+  <div class="sm-kpi"><b>HHI 行业集中度</b><span class="{hhi_cls}">{conc['hhi']:.3f}</span></div>
 </div>"""
 
     # 公募行业配置表（带占比条）
@@ -397,13 +370,13 @@ def report_html(conn, end_date: str, prev_date: str | None = None) -> str:
             bar_w = (r.ratio / max_ratio * 100) if max_ratio else 0
             rows.append(
                 f"<tr><td>{_esc(r.industry)}</td>"
-                f"<td><span class='bar'><i style='width:{bar_w:.0f}%'></i></span>{pct:.1f}%</td>"
+                f"<td><span class='sm-bar'><i style='width:{bar_w:.0f}%'></i></span>{pct:.1f}%</td>"
                 f"<td class='num'>{r.amount / 1e4:.1f} 亿</td></tr>"
             )
         ind_html = f"""
-<section><h2>公募行业配置（持仓市值加权）</h2><div class="card">
-<table><tr><th>行业</th><th>占比</th><th>持仓市值</th></tr>{''.join(rows)}</table>
-</div></section>"""
+<div class="sm-section"><h3>公募行业配置（持仓市值加权）</h3><div class="panel">
+<table class="table"><tr><th>行业</th><th>占比</th><th>持仓市值</th></tr>{''.join(rows)}</table>
+</div></div>"""
 
     # QoQ 变化
     qoq_html = ""
@@ -415,29 +388,29 @@ def report_html(conn, end_date: str, prev_date: str | None = None) -> str:
             merged["delta"] = merged["ratio_cur"] - merged["ratio_prev"]
             merged = merged.sort_values("delta", ascending=False)
             add_items = "".join(
-                f"<li class='up'>▲ {_esc(r.industry)} <b>{r.delta:+.1%}</b></li>"
+                f"<li class='sm-up'>▲ {_esc(r.industry)} <b>{r.delta:+.1%}</b></li>"
                 for r in merged.head(5).itertuples()
             )
             cut_items = "".join(
-                f"<li class='down'>▼ {_esc(r.industry)} <b>{r.delta:+.1%}</b></li>"
+                f"<li class='sm-down'>▼ {_esc(r.industry)} <b>{r.delta:+.1%}</b></li>"
                 for r in merged.tail(5).iloc[::-1].itertuples()
             )
             qoq_html = f"""
-<section><h2>QoQ 行业配置变化（{prev_date} → {end_date}）</h2><div class="card two">
-<div><h3>加仓 TOP5</h3><ul>{add_items}</ul></div>
-<div><h3>减仓 TOP5</h3><ul>{cut_items}</ul></div>
-</div></section>"""
+<div class="sm-section"><h3>QoQ 行业配置变化（{prev_date} → {end_date}）</h3><div class="panel sm-two">
+<div><h4 style="color:var(--muted);font-size:13px;margin-bottom:8px">加仓 TOP5</h4><ul>{add_items}</ul></div>
+<div><h4 style="color:var(--muted);font-size:13px;margin-bottom:8px">减仓 TOP5</h4><ul>{cut_items}</ul></div>
+</div></div>"""
 
     # 重仓股换血
     chg_html = ""
     if chg:
-        new_items = "".join(f"<li class='up'>▲ {_esc(n)}</li>" for _, n in chg["new_entries"]) or "<li>无</li>"
-        exit_items = "".join(f"<li class='down'>▼ {_esc(n)}</li>" for _, n in chg["exits"]) or "<li>无</li>"
+        new_items = "".join(f"<li class='sm-up'>▲ {_esc(n)}</li>" for _, n in chg["new_entries"]) or "<li>无</li>"
+        exit_items = "".join(f"<li class='sm-down'>▼ {_esc(n)}</li>" for _, n in chg["exits"]) or "<li>无</li>"
         chg_html = f"""
-<section><h2>公募重仓股换血（{prev_date} → {end_date}）</h2><div class="card two">
-<div><h3>新进前十</h3><ul>{new_items}</ul></div>
-<div><h3>退出前十</h3><ul>{exit_items}</ul></div>
-</div></section>"""
+<div class="sm-section"><h3>公募重仓股换血（{prev_date} → {end_date}）</h3><div class="panel sm-two">
+<div><h4 style="color:var(--muted);font-size:13px;margin-bottom:8px">新进前十</h4><ul>{new_items}</ul></div>
+<div><h4 style="color:var(--muted);font-size:13px;margin-bottom:8px">退出前十</h4><ul>{exit_items}</ul></div>
+</div></div>"""
 
     # 社保/汇金
     flow_html = ""
@@ -447,7 +420,7 @@ def report_html(conn, end_date: str, prev_date: str | None = None) -> str:
         for r in flow["industry"].head(8).itertuples():
             rows.append(
                 f"<tr><td>{_esc(r.industry)}</td>"
-                f"<td class='num'>{r.amount / 1e8:.1f} 亿</td>"
+                f"<td class='num'>{r.amount / 1e4:.1f} 亿</td>"
                 f"<td class='num'>{r.ratio:.1%}</td></tr>"
             )
         chg_items = ""
@@ -455,15 +428,15 @@ def report_html(conn, end_date: str, prev_date: str | None = None) -> str:
             used_prev = flow.get("used_prev", prev_date)
             chg_items = "".join(
                 f"<li>{_esc(c['name'])}（{_esc(c['holder'])}）"
-                f"<b class='{'up' if c['delta'] > 0 else 'down'}'>"
+                f"<b class='{'sm-up' if c['delta'] > 0 else 'sm-down'}'>"
                 f"{c['delta'] / 1e4:+,.0f} 万股</b></li>"
                 for c in flow["changes"][:5]
             )
         flow_html = f"""
-<section><h2>社保 / 汇金 / 养老金（直接持股，报告期 {used_end}）</h2>
-<div class="card"><table><tr><th>行业</th><th>市值</th><th>占比</th></tr>{''.join(rows)}</table></div>
-{f'<div class="card"><h3>增减持 TOP5（{used_prev} → {used_end}）</h3><ul>{chg_items}</ul></div>' if chg_items else ''}
-</section>"""
+<div class="sm-section"><h3>社保 / 汇金 / 养老金（直接持股，报告期 {used_end}）</h3>
+<div class="panel"><table class="table"><tr><th>行业</th><th>市值</th><th>占比</th></tr>{''.join(rows)}</table></div>
+{f'<div class="panel" style="margin-top:12px"><h4 style="color:var(--muted);font-size:13px;margin-bottom:8px">增减持 TOP5（{used_prev} → {used_end}）</h4><ul>{chg_items}</ul></div>' if chg_items else ''}
+</div>"""
 
     # 结论
     concl_html = ""
@@ -476,22 +449,52 @@ def report_html(conn, end_date: str, prev_date: str | None = None) -> str:
             parts.append("HHI 偏高，抱团拥挤")
         if len(parts) > 1:
             parts.append("止盈纪律优先，不追高")
-        concl_html = f'<div class="conclusion"><b>结论：</b>{"；".join(parts)}。</div>'
+        concl_html = f'<div class="sm-conclusion"><b>结论：</b>{"；".join(parts)}。</div>'
 
-    return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>聪明钱市场大方向报告 · {end_date}</title>
-<style>{_HTML_CSS}</style></head><body><main>
-<header>
-  <h1>🧠 聪明钱市场大方向报告</h1>
-  <div class="sub">报告期 {end_date} · 自动生成 · 数据口径：公募=主动权益基金前十大重仓股聚合（近似行业配置，非全仓精确值）</div>
+    return f"""<!doctype html><html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>聪明钱分析报告 · {end_date} · Stocks 研究站</title>
+<link rel="stylesheet" href="/assets/style.css">
+<style>{_HTML_CSS}</style></head><body>
+<header class="top-bar">
+  <div class="brand"><a href="/">📈 Stocks 研究站</a></div>
+  <nav class="top-nav">
+    <a href="/industries">🏭 产业地图</a>
+    <a href="/articles">📖 文章</a>
+    <a href="/smart-money" class="active">🧠 聪明钱</a>
+  </nav>
+  <div class="top-right">
+    <span id="who"></span>
+    <button id="theme-btn" class="btn-theme"></button>
+    <button id="logout-btn" class="btn-ghost">退出</button>
+  </div>
 </header>
-{kpi_html}
-{ind_html}
-{qoq_html}
-{chg_html}
-{flow_html}
-{concl_html}
-<footer>数据源：天天基金 fundf10（公募持仓）· tushare top10_holders（社保/汇金/养老金）· 东财行业映射<br>
-定位：第二层证据（资金面共识验证），非买入信号。季度频率，披露滞后 1-2 个月。</footer>
-</main></body></html>"""
+<main class="container">
+  <h2>🧠 聪明钱市场大方向报告</h2>
+  <div class="sm-note">报告期 {end_date} · 自动生成 · 数据口径：公募=主动权益基金前十大重仓股聚合（近似行业配置，非全仓精确值）</div>
+  {kpi_html}
+  {ind_html}
+  {qoq_html}
+  {chg_html}
+  {flow_html}
+  {concl_html}
+  <div class="sm-note">数据源：天天基金 fundf10（公募持仓）· tushare top10_holders（社保/汇金/养老金）· 东财行业映射<br>
+  定位：第二层证据（资金面共识验证），非买入信号。季度频率，披露滞后 1-2 个月。</div>
+</main>
+<script>
+(async function () {{
+  try {{
+    const r = await fetch('/api/me');
+    if (r.ok) {{
+      const d = await r.json();
+      document.getElementById('who').textContent = d.username + (d.role === 'admin' ? ' · 管理员' : '');
+    }}
+  }} catch (e) {{}}
+  document.getElementById('logout-btn').addEventListener('click', async () => {{
+    await fetch('/api/logout', {{ method: 'POST' }});
+    location.href = '/login';
+  }});
+}})();
+</script>
+<script src="/assets/theme.js"></script>
+</body></html>"""
