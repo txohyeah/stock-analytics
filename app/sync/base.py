@@ -371,6 +371,8 @@ def sync_fund_holdings(ctx: SyncContext, dataset: Dataset, start_date: str, end_
     每只基金请求最新 2 个年份（provider 内部处理），合并后取最近 4 个季度。
     限速 2 req/s；断点续爬：已有最新季度数据的基金跳过（fund_code 存纯数字，
     ts_code 带 .OF 后缀，需归一化比较）。
+    增量模式：fund_holdings 已有数据时（季度任务场景）只请求最新 1 年，
+    请求量减半（约 30-50 分钟），避免 cron 任务超时。
     """
     del start_date, ts_code
     from app.providers.eastmoney_fund import fetch_fund_holdings
@@ -385,6 +387,10 @@ def sync_fund_holdings(ctx: SyncContext, dataset: Dataset, start_date: str, end_
     )
     if not funds:
         raise RuntimeError("fund_basic 为空或筛选后无基金。先执行: sync fund_basic")
+
+    # 增量模式：已有数据时只请求最新 1 年（补最新季度）；全量（首次）请求 2 年
+    has_data = ctx.store.query("SELECT COUNT(*) FROM fund_holdings")[0][0] > 0
+    years = 1 if has_data else 2
 
     # 断点续爬：已有最新季度数据的基金跳过
     latest_q = ctx.store.query("SELECT MAX(end_date) FROM fund_holdings")
@@ -407,7 +413,7 @@ def sync_fund_holdings(ctx: SyncContext, dataset: Dataset, start_date: str, end_
             skipped += 1
             continue
         try:
-            frame = fetch_fund_holdings(fund_code)
+            frame = fetch_fund_holdings(fund_code, years=years)
         except Exception as exc:  # noqa: BLE001 - 单只失败不中断，记录后继续
             failed.append(f"{fund_code}: {exc}")
             logger.warning("fund_holdings %s failed: %s", fund_code, exc)

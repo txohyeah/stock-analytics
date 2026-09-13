@@ -130,8 +130,12 @@ def _extract_table_rows(table_html: str) -> list[dict]:
     return [r for r in rows if r["rank"] <= 10]
 
 
-def fetch_fund_holdings(fund_code: str, year: int | None = None, month: int | None = None) -> pd.DataFrame:
+def fetch_fund_holdings(fund_code: str, year: int | None = None, month: int | None = None, years: int = 2) -> pd.DataFrame:
     """爬一只基金的前十大重仓股（最近 4 个季度）。
+
+    Args:
+        years: 请求几个年份。全量 2（当前年+上年，保证 4 季度 QoQ 口径）；
+               增量 1（只补最新季度，已有历史数据的季度任务用，请求量减半）。
 
     Returns:
         DataFrame[fund_code, ts_code, name, end_date, rank, hold_ratio, hold_vol, hold_amount]
@@ -152,6 +156,8 @@ def fetch_fund_holdings(fund_code: str, year: int | None = None, month: int | No
         df = _fetch_year(fund_code, y)
         if not df.empty:
             frames.append(df)
+        if len(frames) >= years:
+            break
     if not frames:
         return pd.DataFrame()
     result = pd.concat(frames, ignore_index=True)
