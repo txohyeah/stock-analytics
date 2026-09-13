@@ -385,11 +385,12 @@ def add_analytics_subparsers(sub) -> None:
     _db_arg(sm_parser)
     sm_parser.add_argument("--end", required=True, help="报告期 YYYYMMDD，如 20250630")
     sm_parser.add_argument("--prev", help="对比上期 YYYYMMDD，如 20250331（缺省自动取上一季度）")
+    sm_parser.add_argument("--html", help="同时输出 HTML 页面到指定路径（内置模板，无外部依赖）")
     sm_parser.set_defaults(func=_smart_money)
 
 
 def _smart_money(args: argparse.Namespace) -> int:
-    from .smart_money import report
+    from .smart_money import report, report_html
 
     repository = _stock_repository(args.database)
     prev = args.prev
@@ -400,6 +401,10 @@ def _smart_money(args: argparse.Namespace) -> int:
         prev = f"{y - 1 if m == 3 else y}{q_end[args.end[4:6]]}"
     with repository._connect() as conn:
         text = report(conn, args.end, prev)
+        if args.html:
+            html = report_html(conn, args.end, prev)
+            Path(args.html).write_text(html, encoding="utf-8")
+            print(f"[HTML] 已输出: {args.html}")
     print(text)
     return 0
 
