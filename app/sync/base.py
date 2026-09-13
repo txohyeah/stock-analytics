@@ -318,6 +318,27 @@ def sync_index_basic(ctx: SyncContext, dataset: Dataset, start_date: str, end_da
     return fetched, affected
 
 
+def sync_fund_basic_paged(ctx: SyncContext, dataset: Dataset, start_date: str, end_date: str, ts_code: str | None) -> tuple[int, int]:
+    """fund_basic 全量分页拉取（tushare 单次上限 5000 行，不分页会漏基金）。
+
+    实测 2026-09-13：market='O' status='L' 全量约 2 万+ 行，单次只返回前 15000，
+    110022 易方达消费行业股票等老基金被漏掉。用 offset/limit 分页拉全。
+    """
+    del start_date, end_date, ts_code
+    params = dict(dataset.default_params or {})
+    fetched = 0
+    affected = 0
+    offset = 0
+    while True:
+        frame = ctx.client.query(dataset.api_name, offset=offset, limit=5000, **params)
+        fetched += len(frame)
+        affected += upsert(ctx, dataset, frame)
+        if len(frame) < 5000:
+            break
+        offset += 5000
+    return fetched, affected
+
+
 def sync_by_period_paged(ctx: SyncContext, dataset: Dataset, start_date: str, end_date: str, ts_code: str | None) -> tuple[int, int]:
     """top10_holders/top10_floatholders：period=end_date 全市场分页拉。
 
@@ -347,8 +368,9 @@ def sync_fund_holdings(ctx: SyncContext, dataset: Dataset, start_date: str, end_
       fund_type in (混合型, 股票型)
       剔除 name 含 指数/ETF/联接/QDII
       剔除 name 以 C/E 结尾（份额类别，同持仓只留 A）
-    每只基金一次请求返回最近 4 个季度（provider 内部处理，year/month 参数被接口忽略）。
-    限速 2 req/s；断点续爬：已存在该基金任何季度数据的跳过。
+    每只基金请求最新 2 个年份（provider 内部处理），合并后取最近 4 个季度。
+    限速 2 req/s；断点续爬：已有最新季度数据的基金跳过（fund_code 存纯数字，
+    ts_code 带 .OF 后缀，需归一化比较）。
     """
     del start_date, ts_code
     from app.providers.eastmoney_fund import fetch_fund_holdings
@@ -364,22 +386,28 @@ def sync_fund_holdings(ctx: SyncContext, dataset: Dataset, start_date: str, end_
     if not funds:
         raise RuntimeError("fund_basic 为空或筛选后无基金。先执行: sync fund_basic")
 
-    # 断点续爬：已爬过的基金跳过
-    done = {
-        row[0]
-        for row in ctx.store.query("SELECT DISTINCT fund_code FROM fund_holdings")
-    }
+    # 断点续爬：已有最新季度数据的基金跳过
+    latest_q = ctx.store.query("SELECT MAX(end_date) FROM fund_holdings")
+    latest_q = latest_q[0][0] if latest_q and latest_q[0][0] else ""
+    done: set[str] = set()
+    if latest_q:
+        done = {
+            row[0].split(".")[0]
+            for row in ctx.store.query(
+                "SELECT DISTINCT fund_code FROM fund_holdings WHERE end_date = ?", (latest_q,)
+            )
+        }
 
     fetched = 0
     affected = 0
     skipped = 0
     failed: list[str] = []
     for fund_code, fund_name in funds:
-        if fund_code in done:
+        if fund_code.split(".")[0] in done:
             skipped += 1
             continue
         try:
-            frame = fetch_fund_holdings(fund_code, 2025, 12)
+            frame = fetch_fund_holdings(fund_code)
         except Exception as exc:  # noqa: BLE001 - 单只失败不中断，记录后继续
             failed.append(f"{fund_code}: {exc}")
             logger.warning("fund_holdings %s failed: %s", fund_code, exc)
@@ -406,6 +434,7 @@ STRATEGIES: dict[str, SyncFunction] = {
     "trade_cal": sync_trade_cal,
     "index_basic": sync_index_basic,
     "holders": sync_by_period_paged,
+    "fund_basic_paged": sync_fund_basic_paged,
     "fund_holdings": sync_fund_holdings,
 }
 

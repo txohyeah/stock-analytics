@@ -137,7 +137,22 @@ def smart_money_flow(conn, end_date: str, prev_date: str | None = None) -> dict:
 
     注意：top10_holders.hold_amount 是持股**股数**（不是市值），
     行业分布需乘最新收盘价换算成市值；增减持则看股数变化（原值相减）。
+
+    报告期自动对齐：top10_holders 披露滞后（如公募已到 2026Q2 时股东数据
+    可能只到 2025Q4），这里自动取 top10_holders 的最新可用季度，避免空报告。
     """
+    avail = _query(conn, "SELECT MAX(end_date) FROM top10_holders")
+    avail = avail[0][0] if avail and avail[0][0] else None
+    if not avail:
+        return {"industry": pd.DataFrame(), "changes": [], "used_end": None}
+    if end_date > avail:
+        end_date = avail
+    if prev_date and prev_date > avail:
+        # 自动取 avail 的上一季度（与 end_date fallback 对齐）
+        y, m = int(avail[:4]), int(avail[4:6])
+        q_end = {"03": "1231", "06": "0331", "09": "0630", "12": "0930"}
+        prev_date = f"{y - 1 if m == 3 else y}{q_end[avail[4:6]]}"
+
     latest_date = _query(conn, "SELECT MAX(trade_date) FROM daily")
     latest_date = latest_date[0][0] if latest_date else None
     industry_map = _industry_map(conn)
@@ -163,7 +178,7 @@ def smart_money_flow(conn, end_date: str, prev_date: str | None = None) -> dict:
 
     cur = holders_for(end_date)
     if cur.empty:
-        return {"industry": pd.DataFrame(), "changes": []}
+        return {"industry": pd.DataFrame(), "changes": [], "used_end": end_date}
 
     # 行业分布
     cur = cur.copy()
@@ -195,7 +210,7 @@ def smart_money_flow(conn, end_date: str, prev_date: str | None = None) -> dict:
                 }
                 for r in moved.itertuples()
             ]
-    return {"industry": ind_df, "changes": changes}
+    return {"industry": ind_df, "changes": changes, "used_end": end_date, "used_prev": prev_date}
 
 
 def report(conn, end_date: str, prev_date: str | None = None) -> str:
@@ -210,6 +225,26 @@ def report(conn, end_date: str, prev_date: str | None = None) -> str:
     if not ind.empty:
         lines.append("【1】公募行业配置（持仓市值加权）")
         lines.append(ind.head(10).to_string(index=False))
+        # QoQ 变化：加仓 TOP5 / 减仓 TOP5
+        if prev_date:
+            prev_ind = industry_allocation(conn, prev_date)
+            if not prev_ind.empty:
+                merged = ind.merge(
+                    prev_ind[["industry", "ratio"]],
+                    on="industry",
+                    how="outer",
+                    suffixes=("_cur", "_prev"),
+                ).fillna(0)
+                merged["delta"] = merged["ratio_cur"] - merged["ratio_prev"]
+                merged = merged.sort_values("delta", ascending=False)
+                add_top = merged.head(5)
+                cut_top = merged.tail(5).iloc[::-1]
+                lines.append(f"  QoQ 加仓 TOP5（{prev_date} → {end_date}，占比变化）:")
+                for r in add_top.itertuples():
+                    lines.append(f"    {r.industry}: {r.delta:+.1%}")
+                lines.append(f"  QoQ 减仓 TOP5:")
+                for r in cut_top.itertuples():
+                    lines.append(f"    {r.industry}: {r.delta:+.1%}")
         lines.append("")
 
     # 2. 抱团集中度
@@ -234,13 +269,15 @@ def report(conn, end_date: str, prev_date: str | None = None) -> str:
     # 4. 社保/汇金
     flow = smart_money_flow(conn, end_date, prev_date)
     if not flow["industry"].empty:
-        lines.append("【4】社保/汇金/养老金行业分布（直接持股，按市值聚合，单位亿元）")
+        used_end = flow.get("used_end", end_date)
+        lines.append(f"【4】社保/汇金/养老金行业分布（直接持股，按市值聚合，单位亿元，报告期 {used_end}）")
         ind_view = flow["industry"].head(8).copy()
         ind_view["市值(亿)"] = (ind_view["amount"] / 1e8).round(1)
         ind_view["占比"] = (ind_view["ratio"] * 100).round(2).astype(str) + "%"
         lines.append(ind_view[["industry", "市值(亿)", "占比"]].to_string(index=False))
         if flow["changes"]:
-            lines.append(f"  增减持 TOP5（{prev_date} → {end_date}，单位：万股）:")
+            used_prev = flow.get("used_prev", prev_date)
+            lines.append(f"  增减持 TOP5（{used_prev} → {used_end}，单位：万股）:")
             for c in flow["changes"][:5]:
                 lines.append(f"    {c['name']}({c['ts_code']}) {c['holder']}: {c['delta'] / 1e4:+,.0f} 万股")
         lines.append("")
@@ -252,8 +289,13 @@ def report(conn, end_date: str, prev_date: str | None = None) -> str:
         lines.append(
             f"  公募资金最集中的方向是「{top_ind['industry']}」（占 {top_ind['ratio']:.1%}）。"
         )
+        conc_text = []
+        if conc["top3_industry"] is not None and conc["top3_industry"] > 0.5:
+            conc_text.append(f"前3大行业合计 {conc['top3_industry']:.0%}，方向高度集中")
         if conc["hhi"] is not None and conc["hhi"] > 0.25:
-            lines.append("  行业集中度 HHI 偏高，抱团明显——拥挤度风险需警惕，止盈纪律优先。")
+            conc_text.append("HHI 偏高，抱团拥挤")
+        if conc_text:
+            lines.append(f"  拥挤度提示：{'；'.join(conc_text)}——止盈纪律优先，不追高。")
         else:
             lines.append("  行业集中度尚可，抱团风险相对可控。")
     return "\n".join(lines)

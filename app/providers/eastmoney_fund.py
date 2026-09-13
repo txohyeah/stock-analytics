@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime
 
 import pandas as pd
 import requests
@@ -129,24 +130,46 @@ def _extract_table_rows(table_html: str) -> list[dict]:
     return [r for r in rows if r["rank"] <= 10]
 
 
-def fetch_fund_holdings(fund_code: str, year: int, month: int) -> pd.DataFrame:
-    """爬一只基金的前十大重仓股（含最近 4 个季度）。
+def fetch_fund_holdings(fund_code: str, year: int | None = None, month: int | None = None) -> pd.DataFrame:
+    """爬一只基金的前十大重仓股（最近 4 个季度）。
 
     Returns:
         DataFrame[fund_code, ts_code, name, end_date, rank, hold_ratio, hold_vol, hold_amount]
         无数据时返回空 DataFrame。
 
-    注意：fund_code 必须为纯数字（如 '110022'）。若传入 '110022.OF' 等带后缀
-    代码，接口会返回默认响应（多只基金返回完全相同数据，实测 2026-09-12），
-    因此这里强制剥离 .OF 后缀。
+    注意：
+    - fund_code 必须为纯数字（如 '110022'）。若传入 '110022.OF' 等带后缀
+      代码，接口会返回默认响应（多只基金返回完全相同数据，实测 2026-09-12），
+      因此这里强制剥离 .OF 后缀。
+    - year 参数控制返回哪一年的季度数据（实测 2026-09-12）：
+      请求 year=2026 返回 2026Q2/Q1，请求 year=2025 返回 2025Q4/Q3/Q2/Q1。
+      因此请求最新 2 个年份，合并后取最近 4 个季度（保证 QoQ 对比口径）。
     """
     fund_code = str(fund_code).split(".")[0]
+    current_year = year or datetime.now().year
+    frames: list[pd.DataFrame] = []
+    for y in (current_year, current_year - 1):
+        df = _fetch_year(fund_code, y)
+        if not df.empty:
+            frames.append(df)
+    if not frames:
+        return pd.DataFrame()
+    result = pd.concat(frames, ignore_index=True)
+    # 取最近 4 个季度（按报告期倒序）
+    quarters = sorted(result["end_date"].unique(), reverse=True)[:4]
+    result = result[result["end_date"].isin(quarters)]
+    result["fund_code"] = fund_code
+    return result
+
+
+def _fetch_year(fund_code: str, year: int) -> pd.DataFrame:
+    """请求单一年份的持仓数据。"""
     params = {
         "type": "jjcc",
         "code": fund_code,
         "topline": 10,
         "year": year,
-        "month": month,
+        "month": 12,
     }
     resp = requests.get(FUNDF10_URL, params=params, headers=HEADERS, timeout=15)
     resp.raise_for_status()
@@ -180,6 +203,4 @@ def fetch_fund_holdings(fund_code: str, year: int, month: int) -> pd.DataFrame:
         frames.append(df)
     if not frames:
         return pd.DataFrame()
-    result = pd.concat(frames, ignore_index=True)
-    result["fund_code"] = fund_code
-    return result
+    return pd.concat(frames, ignore_index=True)

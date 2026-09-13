@@ -64,12 +64,13 @@ DATASETS: dict[str, Dataset] = {
         "holders",
     ),
     # 基金列表（场外，market='O'；主动权益筛选在 sync_fund_holdings 内做）
+    # 策略 fund_basic_paged：tushare 单次上限 5000 行，必须分页拉全（否则漏老基金）
     "fund_basic": Dataset(
         "fund_basic",
         "fund_basic",
         "fund_basic",
         ("ts_code",),
-        "basic",
+        "fund_basic_paged",
         {"market": "O", "status": "L"},
     ),
     # 基金前十大重仓股（天天基金爬虫，fund_holdings 策略）
