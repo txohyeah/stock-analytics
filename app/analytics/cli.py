@@ -237,7 +237,6 @@ def _account_review(args: argparse.Namespace) -> int:
 
 def _baolei(args: argparse.Namespace) -> dict[str, object]:
     return run_baolei(
-        all_mode=args.all,
         codes=args.codes,
         self_test=args.self_test,
         report=args.report,
@@ -360,7 +359,6 @@ def add_analytics_subparsers(sub) -> None:
     ar_parser.set_defaults(func=_account_review)
 
     baolei_parser = sub.add_parser("baolei")
-    baolei_parser.add_argument("--all", action="store_true")
     baolei_parser.add_argument("--codes", type=str, default="")
     baolei_parser.add_argument("--self-test", action="store_true")
     baolei_parser.add_argument("--report", type=str, default="")

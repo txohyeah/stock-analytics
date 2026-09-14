@@ -87,7 +87,7 @@ crontab（已配置）：
 ./venv/bin/python -m app.cli market-review --date latest
 ./venv/bin/python -m app.cli market-period-review --period week
 ./venv/bin/python -m app.cli account-review --positions positions.csv
-./venv/bin/python -m app.cli baolei --self-test        # 五雷区（零审计/一利润/二现金流/三商誉/四拐点）；或 --codes / --all --report out.md
+./venv/bin/python -m app.cli baolei --self-test        # 五雷区 + 12 项深度检查（指定股票排雷：--codes 600519.SH,000001.SZ [--report out.md]）
 ./venv/bin/python -m app.cli lhb                            # 龙虎榜超买/超卖信号（--trade-date YYYYMMDD 指定）
 ./venv/bin/python -m app.cli chart --code 600519.SH --output chart.png
 

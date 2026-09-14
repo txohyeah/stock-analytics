@@ -17,9 +17,8 @@
 from __future__ import annotations
 
 import sqlite3
-from collections import Counter, defaultdict
+from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +52,7 @@ class StockResult:
     r3_detail: str = ""
     r4: str = GREEN          # 雷区四 业绩拐点（最新报告期营收/归母同比转负）
     r4_detail: str = ""
+    deep_checks: list = field(default_factory=list)  # 深度排雷检查项（李神奇方法扩展）
     rating: str = GREEN      # 综合 暴雷可能性
     reasons: list = field(default_factory=list)
 
@@ -89,19 +89,22 @@ def bulk_fetch(db_path: str | Path | None = None) -> tuple[dict[str, list], dict
         )
 
         q_income = (
-            "SELECT ts_code, end_date, ann_date, n_income, n_income_attr_p FROM income "
+            "SELECT ts_code, end_date, ann_date, n_income, n_income_attr_p, revenue, "
+            "fv_value_chg_gain, invest_income, rd_exp, n_oth_income, assets_impair_loss FROM income "
             "WHERE substr(end_date,5,4)='1231'"
         )
         q_cashflow = (
-            "SELECT ts_code, end_date, ann_date, n_cashflow_act FROM cashflow "
+            "SELECT ts_code, end_date, ann_date, n_cashflow_act, c_fr_sale_sg FROM cashflow "
             "WHERE substr(end_date,5,4)='1231'"
         )
         q_balancesheet = (
-            "SELECT ts_code, end_date, ann_date, goodwill, total_hldr_eqy_exc_min_int "
-            "FROM balancesheet WHERE substr(end_date,5,4)='1231'"
+            "SELECT ts_code, end_date, ann_date, goodwill, total_hldr_eqy_exc_min_int, "
+            "inventories, payroll_payable, money_cap, st_borr, lt_borr, bond_payable FROM balancesheet "
+            "WHERE substr(end_date,5,4)='1231'"
         )
         q_fina = (
-            "SELECT ts_code, end_date, ann_date, profit_dedt, dt_netprofit_yoy, netprofit_yoy FROM fina_indicator "
+            "SELECT ts_code, end_date, ann_date, profit_dedt, dt_netprofit_yoy, netprofit_yoy, "
+            "netprofit_margin, grossprofit_margin, turn_days, interestdebt, debt_to_assets FROM fina_indicator "
             "WHERE substr(end_date,5,4)='1231'"
         )
         rows_income = conn.execute(q_income).fetchall()
@@ -162,10 +165,16 @@ def bulk_fetch(db_path: str | Path | None = None) -> tuple[dict[str, list], dict
             d["ann_date"] = r["ann_date"]
         d["n_income"] = r["n_income"]
         d["n_income_attr_p"] = r["n_income_attr_p"]
+        d["revenue"] = r["revenue"]
+        d["fv_value_chg_gain"] = r["fv_value_chg_gain"]
+        d["invest_income"] = r["invest_income"]
+        d["rd_exp"] = r["rd_exp"]
+        d["n_oth_income"] = r["n_oth_income"]
+        d["assets_impair_loss"] = r["assets_impair_loss"]
     for src, tags in (
-        (rows_cf, ("n_cashflow_act",)),
-        (rows_bs, ("goodwill", "total_hldr_eqy_exc_min_int")),
-        (rows_fina, ("profit_dedt", "dt_netprofit_yoy", "netprofit_yoy")),
+        (rows_cf, ("n_cashflow_act", "c_fr_sale_sg")),
+        (rows_bs, ("goodwill", "total_hldr_eqy_exc_min_int", "inventories", "payroll_payable", "money_cap", "st_borr", "lt_borr", "bond_payable")),
+        (rows_fina, ("profit_dedt", "dt_netprofit_yoy", "netprofit_yoy", "netprofit_margin", "grossprofit_margin", "turn_days", "interestdebt", "debt_to_assets")),
     ):
         for r in src:
             key = (r["ts_code"], r["end_date"])
@@ -184,6 +193,216 @@ def bulk_fetch(db_path: str | Path | None = None) -> tuple[dict[str, list], dict
     for code in by_code:
         by_code[code].sort(key=lambda x: str(x["end_date"]), reverse=True)
     return by_code, basic_map, audit_map, trend_map
+
+
+def _to_float(v: Any) -> float | None:
+    """TEXT 字段安全转 float（空串/None/非法值 → None）。"""
+    if v is None:
+        return None
+    if isinstance(v, str):
+        v = v.strip()
+        if not v:
+            return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _deep_checks(annual: list, trend: dict[str, Any] | None = None, industry: str = "") -> list[dict]:
+    """深度排雷检查项（李神奇方法 + 财报排雷手册扩展）。
+
+    返回 [{name, level, detail}]，level ∈ 红/黄/绿。数据不足时该项跳过（sk）。
+    全部基于年报（annual desc by end_date）+ 最新报告期趋势（trend）。
+    金融股（银行/保险/证券）投资收益/公允价值变动是主业，跳过相关检查。
+    """
+    checks: list[dict] = []
+    latest = annual[0] if annual else None
+    if latest is None:
+        return checks
+
+    is_fin = any(k in (industry or "") for k in ("银行", "保险", "证券", "多元金融"))
+
+    ni = _to_float(latest.get("n_income_attr_p"))  # 归母净利润
+    rev = _to_float(latest.get("revenue"))
+    ocf = _to_float(latest.get("n_cashflow_act"))
+    eq = _to_float(latest.get("total_hldr_eqy_exc_min_int"))
+
+    # ---------- 利润质量 ----------
+    # 1. 公允价值变动收益占比（昭衍新药猴子案例：利润全靠资产增值）
+    fv = _to_float(latest.get("fv_value_chg_gain"))
+    if fv is not None and ni is not None and ni > 0 and not is_fin:
+        ratio = fv / ni
+        if ratio > 0.5:
+            checks.append({"name": "公允价值变动收益占比", "level": RED,
+                           "detail": f"公允价值变动收益 {fv/1e8:.2f}亿 / 归母净利润 {ni/1e8:.2f}亿 = {ratio:.0%}（>50%，利润靠资产增值撑）"})
+        elif ratio > 0.3:
+            checks.append({"name": "公允价值变动收益占比", "level": YELLOW,
+                           "detail": f"公允价值变动收益占归母净利润 {ratio:.0%}（30%~50%，利润含金量偏弱）"})
+        else:
+            checks.append({"name": "公允价值变动收益占比", "level": GREEN,
+                           "detail": f"公允价值变动收益占归母净利润 {ratio:.0%}（<=30%，健康）"})
+
+    # 2. 投资收益占比（药明康德案例：投资收益占利润一小半 = 业绩虚高）
+    inv = _to_float(latest.get("invest_income"))
+    if inv is not None and ni is not None and ni > 0 and not is_fin:
+        ratio = inv / ni
+        if ratio > 0.5:
+            checks.append({"name": "投资收益占比", "level": RED,
+                           "detail": f"投资收益 {inv/1e8:.2f}亿 / 归母净利润 {ni/1e8:.2f}亿 = {ratio:.0%}（>50%，主业成色差）"})
+        elif ratio > 0.3:
+            checks.append({"name": "投资收益占比", "level": YELLOW,
+                           "detail": f"投资收益占归母净利润 {ratio:.0%}（30%~50%，利润依赖投资收益）"})
+        else:
+            checks.append({"name": "投资收益占比", "level": GREEN,
+                           "detail": f"投资收益占归母净利润 {ratio:.0%}（<=30%，健康）"})
+
+    # 3. 净利率偏离历史均值（德明利案例：44% vs 历史 10% = 异常）
+    npm = _to_float(latest.get("netprofit_margin"))
+    hist_npm = [_to_float(r.get("netprofit_margin")) for r in annual[1:]]
+    hist_npm = [x for x in hist_npm if x is not None]
+    if npm is not None and len(hist_npm) >= 3:
+        avg = sum(hist_npm) / len(hist_npm)
+        if avg > 0:
+            dev = npm / avg
+            if dev > 2.0:
+                checks.append({"name": "净利率偏离历史", "level": RED,
+                               "detail": f"最新净利率 {npm:.1f}% vs 历史均值 {avg:.1f}%（{dev:.1f}倍，异常偏离，警惕利润调节）"})
+            elif dev > 1.5:
+                checks.append({"name": "净利率偏离历史", "level": YELLOW,
+                               "detail": f"最新净利率 {npm:.1f}% vs 历史均值 {avg:.1f}%（{dev:.1f}倍，偏离偏大）"})
+            else:
+                checks.append({"name": "净利率偏离历史", "level": GREEN,
+                               "detail": f"最新净利率 {npm:.1f}% vs 历史均值 {avg:.1f}%（{dev:.1f}倍，正常范围）"})
+
+    # 4. 毛利净利差过小（联创光电案例：毛利率=净利率15%，消费电子不可能）
+    gpm = _to_float(latest.get("grossprofit_margin"))
+    if gpm is not None and npm is not None and npm > 8 and not is_fin:
+        gap = gpm - npm
+        if gap < 3:
+            checks.append({"name": "毛利净利差", "level": RED,
+                           "detail": f"毛利率 {gpm:.1f}% - 净利率 {npm:.1f}% = {gap:.1f}pct（差 <3pct，四费几乎为零，必有非主营收益撑利润）"})
+        elif gap < 8:
+            checks.append({"name": "毛利净利差", "level": YELLOW,
+                           "detail": f"毛利率 {gpm:.1f}% - 净利率 {npm:.1f}% = {gap:.1f}pct（差 <8pct，期间费用异常低）"})
+        else:
+            checks.append({"name": "毛利净利差", "level": GREEN,
+                           "detail": f"毛利率 {gpm:.1f}% - 净利率 {npm:.1f}% = {gap:.1f}pct（正常）"})
+
+    # ---------- 资产与现金流 ----------
+    # 5. 存货增速 vs 营收增速背离（江波龙囤货 257 亿案例）
+    cur_inv = _to_float(latest.get("inventories"))
+    prev = annual[1] if len(annual) > 1 else None
+    prev_inv = _to_float(prev.get("inventories")) if prev else None
+    prev_rev = _to_float(prev.get("revenue")) if prev else None
+    if cur_inv is not None and prev_inv and prev_inv > 0 and rev is not None and prev_rev and prev_rev > 0:
+        inv_g = (cur_inv - prev_inv) / prev_inv
+        rev_g = (rev - prev_rev) / prev_rev
+        gap = inv_g - rev_g
+        if gap > 0.3:
+            checks.append({"name": "存货/营收背离", "level": RED,
+                           "detail": f"存货增速 {inv_g:.0%} vs 营收增速 {rev_g:.0%}（存货快 {gap:.0%}，囤货/压货信号）"})
+        elif gap > 0.15:
+            checks.append({"name": "存货/营收背离", "level": YELLOW,
+                           "detail": f"存货增速 {inv_g:.0%} vs 营收增速 {rev_g:.0%}（存货快 {gap:.0%}，需关注）"})
+        else:
+            checks.append({"name": "存货/营收背离", "level": GREEN,
+                           "detail": f"存货增速 {inv_g:.0%} vs 营收增速 {rev_g:.0%}（匹配）"})
+
+    # 6. 净资产侵蚀速度（卓翼科技案例：净资产÷年亏损=还能撑几年）
+    if eq is not None and eq > 0 and ni is not None and ni < 0:
+        years = eq / abs(ni)
+        if years < 3:
+            checks.append({"name": "净资产侵蚀", "level": RED,
+                           "detail": f"净资产 {eq/1e8:.2f}亿 ÷ 年亏损 {abs(ni)/1e8:.2f}亿 = 还能撑 {years:.1f} 年（<3 年，资不抵债风险）"})
+        elif years < 5:
+            checks.append({"name": "净资产侵蚀", "level": YELLOW,
+                           "detail": f"净资产 {eq/1e8:.2f}亿 ÷ 年亏损 {abs(ni)/1e8:.2f}亿 = 还能撑 {years:.1f} 年（<5 年）"})
+        else:
+            checks.append({"name": "净资产侵蚀", "level": GREEN,
+                           "detail": f"净资产 {eq/1e8:.2f}亿 ÷ 年亏损 {abs(ni)/1e8:.2f}亿 = 还能撑 {years:.1f} 年"})
+
+    # 7. 收现比（江波龙案例：收入 vs 实际收到现金）
+    sale_cash = _to_float(latest.get("c_fr_sale_sg"))
+    if sale_cash is not None and rev is not None and rev > 0 and not is_fin:
+        ratio = sale_cash / rev
+        if ratio < 0.6:
+            checks.append({"name": "收现比", "level": RED,
+                           "detail": f"销售收现 {sale_cash/1e8:.2f}亿 / 营收 {rev/1e8:.2f}亿 = {ratio:.2f}（<0.6，收入含金量差）"})
+        elif ratio < 0.8:
+            checks.append({"name": "收现比", "level": YELLOW,
+                           "detail": f"销售收现 {sale_cash/1e8:.2f}亿 / 营收 {rev/1e8:.2f}亿 = {ratio:.2f}（0.6~0.8，需关注）"})
+        else:
+            checks.append({"name": "收现比", "level": GREEN,
+                           "detail": f"销售收现 {sale_cash/1e8:.2f}亿 / 营收 {rev/1e8:.2f}亿 = {ratio:.2f}（>=0.8，健康）"})
+
+    # 8. 应付薪酬 vs 现金（中公教育案例：应付薪酬 3.39亿 vs 现金 1亿 = 发不出工资风险）
+    payroll = _to_float(latest.get("payroll_payable"))
+    money = _to_float(latest.get("money_cap"))
+    if payroll is not None and money is not None and money > 0:
+        ratio = payroll / money
+        if ratio > 3:
+            checks.append({"name": "应付薪酬/现金", "level": RED,
+                           "detail": f"应付职工薪酬 {payroll/1e8:.2f}亿 vs 货币资金 {money/1e8:.2f}亿（{ratio:.1f}倍，发不出工资风险）"})
+        elif ratio > 1.5:
+            checks.append({"name": "应付薪酬/现金", "level": YELLOW,
+                           "detail": f"应付职工薪酬 {payroll/1e8:.2f}亿 vs 货币资金 {money/1e8:.2f}亿（{ratio:.1f}倍，需关注）"})
+        else:
+            checks.append({"name": "应付薪酬/现金", "level": GREEN,
+                           "detail": f"应付职工薪酬 {payroll/1e8:.2f}亿 vs 货币资金 {money/1e8:.2f}亿（{ratio:.1f}倍，正常）"})
+
+    # 9. 十年累计盈亏（百花医药案例：十年亏 23 亿赚 3 亿 = 大亏小赚）
+    if len(annual) >= 5:
+        cum = sum(_to_float(r.get("n_income_attr_p")) or 0 for r in annual)
+        loss_years = sum(1 for r in annual if (_to_float(r.get("n_income_attr_p")) or 0) < 0)
+        if cum < 0:
+            checks.append({"name": "十年累计盈亏", "level": RED,
+                           "detail": f"近 {len(annual)} 年累计归母 {cum/1e8:.2f}亿（亏损年 {loss_years}/{len(annual)}，大亏小赚）"})
+        elif loss_years > len(annual) / 2:
+            checks.append({"name": "十年累计盈亏", "level": YELLOW,
+                           "detail": f"近 {len(annual)} 年累计归母 {cum/1e8:.2f}亿但亏损年 {loss_years}/{len(annual)}（盈利不稳定）"})
+        else:
+            checks.append({"name": "十年累计盈亏", "level": GREEN,
+                           "detail": f"近 {len(annual)} 年累计归母 {cum/1e8:.2f}亿（亏损年 {loss_years}/{len(annual)}）"})
+
+    # 10. 营业周期（派瑞股份案例：营业周期 800 天 = 收入确认可操纵空间大）
+    # 注意：白酒/地产等天然长周期行业（茅台 1399 天）属行业特性，仅作提示不参与综合评级
+    turn = _to_float(latest.get("turn_days"))
+    if turn is not None:
+        if turn > 730:
+            checks.append({"name": "营业周期", "level": RED,
+                           "detail": f"营业周期 {turn:.0f} 天（>730 天，订单到交付超两年，收入确认可操纵空间大；白酒/地产等长周期行业属特性，需结合业绩判断）"})
+        elif turn > 365:
+            checks.append({"name": "营业周期", "level": YELLOW,
+                           "detail": f"营业周期 {turn:.0f} 天（365~730 天，偏长）"})
+        else:
+            checks.append({"name": "营业周期", "level": GREEN,
+                           "detail": f"营业周期 {turn:.0f} 天（<=365 天，正常）"})
+
+    # 11. 债务偿还年限（京东方案例：有息负债 ÷ 年利润 = 还债要几年）
+    intdebt = _to_float(latest.get("interestdebt"))
+    if intdebt is not None and ni is not None and ni > 0 and not is_fin:
+        years = intdebt / ni
+        if years > 20:
+            checks.append({"name": "债务偿还年限", "level": RED,
+                           "detail": f"有息负债 {intdebt/1e8:.2f}亿 ÷ 年利润 {ni/1e8:.2f}亿 = {years:.1f} 年（>20 年，债务沉重）"})
+        elif years > 10:
+            checks.append({"name": "债务偿还年限", "level": YELLOW,
+                           "detail": f"有息负债 {intdebt/1e8:.2f}亿 ÷ 年利润 {ni/1e8:.2f}亿 = {years:.1f} 年（10~20 年）"})
+        else:
+            checks.append({"name": "债务偿还年限", "level": GREEN,
+                           "detail": f"有息负债 {intdebt/1e8:.2f}亿 ÷ 年利润 {ni/1e8:.2f}亿 = {years:.1f} 年（<=10 年，正常）"})
+
+    # 12. 单季转负预警（派瑞股份案例：上坡路企业单季突然转负 = 要搞幺蛾子）
+    if trend and trend.get("latest_ed"):
+        # trend 只有最新报告期 vs 去年同期；单季转负需更多季度数据，此处用最新报告期归母为负 + 上年同期为正判断
+        cur_np = trend.get("np")
+        prev_np = trend.get("prev_np")
+        if cur_np is not None and prev_np is not None and cur_np < 0 and prev_np > 0:
+            checks.append({"name": "单季转负预警", "level": YELLOW,
+                           "detail": f"{trend['latest_ed'][:4]}-{trend['latest_ed'][4:6]} 归母 {cur_np/1e8:.2f}亿 vs 去年同期 {prev_np/1e8:.2f}亿（上坡路企业单季转负，警惕后续动作）"})
+
+    return checks
 
 
 def evaluate(code: str, basic: dict, annual: list, audit_map: dict[str, dict[str, str]] | None = None, trend: dict[str, Any] | None = None) -> StockResult:
@@ -375,12 +594,17 @@ def evaluate(code: str, basic: dict, annual: list, audit_map: dict[str, dict[str
         res.r4 = SKIP
         res.r4_detail = "无最新报告期数据（income 未同步），业绩拐点跳过"
 
+    # ================= 深度排雷检查（李神奇方法扩展） =================
+    res.deep_checks = _deep_checks(annual, trend, basic.get("industry") or "")
+
     # ================= 综合判定（五档） =================
     flags = [res.r0, res.r1, res.r2, res.r3, res.r4]
     levels = [f for f in flags if f in (RED, YELLOW, GREEN)]
-    if RED in levels:
+    # 营业周期为提示项（白酒/地产等长周期行业天然偏长），不参与综合评级
+    deep_levels = [c["level"] for c in res.deep_checks if c["level"] in (RED, YELLOW, GREEN) and c["name"] != "营业周期"]
+    if RED in levels or RED in deep_levels:
         res.rating = "高"
-    elif YELLOW in levels:
+    elif YELLOW in levels or YELLOW in deep_levels:
         res.rating = "中"
     else:
         res.rating = "低"
@@ -393,8 +617,11 @@ def evaluate(code: str, basic: dict, annual: list, audit_map: dict[str, dict[str
     ):
         if level in (RED, YELLOW):
             res.reasons.append(f"雷区{tag}·{detail}")
+    for c in res.deep_checks:
+        if c["level"] in (RED, YELLOW):
+            res.reasons.append(f"深度·{c['name']}：{c['detail']}")
     if not res.reasons:
-        res.reasons.append("五雷区均未触发预警")
+        res.reasons.append("五雷区及深度检查均未触发预警")
     return res
 
 
@@ -402,109 +629,40 @@ def _end_year(end_date: Any) -> int:
     return int(str(end_date)[:4])
 
 
-def run_all(db_path: str | Path | None = None) -> list[StockResult]:
-    by_code, basic_map, audit_map, trend_map = bulk_fetch(db_path)
-    results = []
-    for code, annual in by_code.items():
-        basic = basic_map.get(code) or {}
-        results.append(evaluate(code, basic, annual, audit_map, trend_map.get(code)))
-    return results
-
-
-def summarize(results) -> tuple[Counter, Counter, Counter, Counter, Counter, Counter]:
-    c = Counter(r.rating for r in results)
-    r0c = Counter(r.r0 for r in results)
-    r1c = Counter(r.r1 for r in results)
-    r2c = Counter(r.r2 for r in results)
-    r3c = Counter(r.r3 for r in results)
-    r4c = Counter(r.r4 for r in results)
-    return c, r0c, r1c, r2c, r3c, r4c
-
-
-def generate_markdown(results, path: str) -> None:
-    c, r0c, r1c, r2c, r3c, r4c = summarize(results)
-    red_r0 = [r for r in results if r.r0 == RED]
-    red_r1 = [r for r in results if r.r1 == RED]
-    red_r2 = [r for r in results if r.r2 == RED]
-    red_r3 = [r for r in results if r.r3 == RED]
-    yel = [r for r in results if r.rating == "中"]
-    yel_r4 = [r for r in results if r.r4 == YELLOW]
-    low = [r for r in results if r.rating == "低"]
-    for lst in (red_r0, red_r1, red_r3, yel_r4, yel, low):
-        lst.sort(key=lambda x: x.name)
-    red_r2.sort(
-        key=lambda x: (len([y for y in x.annual if y.get("n_cashflow_act") is not None and y["n_cashflow_act"] < 0]), x.name),
-        reverse=True,
-    )
+def _format_report(r: StockResult) -> str:
+    """单票完整排雷报告：综合评级 + 触发项 + 详细检查（五雷区 + 深度）。"""
     lines = []
-    lines.append(f"# 全市场财报排雷扫描（基于《财报排雷手册》五雷区）\n")
-    lines.append(f"> 生成日期：{date.today()} ｜ 数据源：income/balancesheet/cashflow/fina_indicator/fina_audit（tushare 同步 → sqlite）｜ 覆盖有年报数据股票 {len(results)} 只\n")
-    lines.append("\n## 一、方法与数据口径\n")
-    lines.append("- 文章五雷区：**雷区零 审计意见（非标前置闸门）｜雷区一 利润结构（扣非/归母）｜雷区二 现金流质量｜雷区三 商誉｜雷区四 业绩拐点**。")
-    lines.append("- **雷区零**：fina_audit.audit_result，标准无保留=绿；带强调事项/解释性说明/持续经营=黄；保留/无法表示/否定=红（利润真实性存疑，前置闸门）。")
-    lines.append("- **雷区一**：扣非/归母（fina_indicator.profit_dedt / income.n_income_attr_p）>=70% 绿、50%~70% 黄、<50% 红；归母为正扣非为负直接红；归母涨扣非跌升一档。")
-    lines.append("- **雷区二**：cashflow.n_cashflow_act 连续为负（硬信号）+ 经营现金流/净利润<0.5（软信号）。")
-    lines.append("- **雷区三**：balancesheet.goodwill / 归母净资产，>30% 红、15%~30% 黄、<=15% 绿（红线 30%）。")
-    lines.append("- **雷区四**：income 最新报告期 vs 去年同期，营收或归母同比转负 = 黄（业绩拐点预警）。\n")
-    lines.append("## 二、评级定义（文章综合判定）\n")
-    lines.append("- 任一红 → **高（排雷未通过）**；有黄无红 → **中（需深挖）**；全绿 → **低（通过排雷关）**。\n")
-    lines.append("## 三、概览统计\n")
-    lines.append(f"- 综合暴雷可能性：**高 {c.get('高',0)} ｜ 中 {c.get('中',0)} ｜ 低 {c.get('低',0)}**")
-    lines.append(f"- 雷区零 审计意见：红 {r0c.get('红',0)} ｜ 黄 {r0c.get('黄',0)} ｜ 绿 {r0c.get('绿',0)} ｜ 跳过 {r0c.get('sk',0)}")
-    lines.append(f"- 雷区一 利润结构：红 {r1c.get('红',0)} ｜ 黄 {r1c.get('黄',0)} ｜ 绿 {r1c.get('绿',0)}")
-    lines.append(f"- 雷区二 现金流：红 {r2c.get('红',0)} ｜ 黄 {r2c.get('黄',0)} ｜ 绿 {r2c.get('绿',0)}")
-    lines.append(f"- 雷区三 商誉：红 {r3c.get('红',0)} ｜ 黄 {r3c.get('黄',0)} ｜ 绿 {r3c.get('绿',0)}")
-    lines.append(f"- 雷区四 业绩拐点：黄 {r4c.get('黄',0)} ｜ 绿 {r4c.get('绿',0)} ｜ 跳过 {r4c.get('sk',0)}\n")
-    lines.append("## 四、雷区零红（非标审计意见）— 共 %d 只\n" % len(red_r0))
-    lines.append("| 代码 | 名称 | 行业 | 说明 |")
-    lines.append("|---|---|---|---|")
-    for r in red_r0:
-        lines.append(f"| {r.ts_code} | {r.name} | {r.industry} | {r.r0_detail} |")
+    lines.append(f"# {r.ts_code} {r.name} 排雷报告")
+    lines.append(f"- 行业：{r.industry or '-'} ｜ 综合评级：**{r.rating}**（任一红=高，有黄=中，全绿=低）")
     lines.append("")
-    lines.append("## 五、雷区一红（利润结构恶化）— 共 %d 只\n" % len(red_r1))
-    lines.append("| 代码 | 名称 | 行业 | 说明 |")
-    lines.append("|---|---|---|---|")
-    for r in red_r1:
-        lines.append(f"| {r.ts_code} | {r.name} | {r.industry} | {r.r1_detail} |")
+    lines.append("## 触发项（红/黄）")
+    if r.reasons:
+        for reason in r.reasons:
+            lines.append(f"- {reason}")
+    else:
+        lines.append("- 无")
     lines.append("")
-    lines.append("## 六、雷区二红（现金流连续为负）— 共 %d 只\n" % len(red_r2))
-    lines.append("> 最硬信号，与文章案例 *ST仕净（连续6年为负）一致。\n")
-    lines.append("| 代码 | 名称 | 行业 | 连续为负年数 | 说明 |")
-    lines.append("|---|---|---|---|---|")
-    for r in red_r2:
-        cons = len([y for y in r.annual if y.get("n_cashflow_act") is not None and y["n_cashflow_act"] < 0])
-        lines.append(f"| {r.ts_code} | {r.name} | {r.industry} | {cons} | {r.r2_detail} |")
+    lines.append("## 五雷区")
+    for tag, level, detail in (
+        ("零 审计意见", r.r0, r.r0_detail),
+        ("一 利润结构", r.r1, r.r1_detail),
+        ("二 现金流质量", r.r2, r.r2_detail),
+        ("三 商誉", r.r3, r.r3_detail),
+        ("四 业绩拐点", r.r4, r.r4_detail),
+    ):
+        lines.append(f"- [{level}] 雷区{tag}：{detail}")
     lines.append("")
-    lines.append("## 七、雷区三红（商誉/归母净资产>30%）— 共 %d 只\n" % len(red_r3))
-    lines.append("| 代码 | 名称 | 行业 | 说明 |")
-    lines.append("|---|---|---|---|")
-    for r in red_r3:
-        lines.append(f"| {r.ts_code} | {r.name} | {r.industry} | {r.r3_detail} |")
-    lines.append("")
-    lines.append("## 八、雷区四黄（业绩拐点预警）— 共 %d 只（样例前 50）\n" % len(yel_r4))
-    lines.append("| 代码 | 名称 | 行业 | 说明 |")
-    lines.append("|---|---|---|---|")
-    for r in yel_r4[:50]:
-        lines.append(f"| {r.ts_code} | {r.name} | {r.industry} | {r.r4_detail} |")
-    lines.append("")
-    lines.append("## 九、中风险（黄）— 共 %d 只（样例前 50）\n" % len(yel))
-    lines.append("| 代码 | 名称 | 行业 | 触发 |")
-    lines.append("|---|---|---|---|")
-    for r in yel[:50]:
-        lines.append(f"| {r.ts_code} | {r.name} | {r.industry} | {'; '.join(r.reasons)} |")
-    lines.append("")
-    lines.append("## 十、低风险（绿）— 共 %d 只\n" % len(low))
-    lines.append("> 五雷区均通过。\n")
-    with open(path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
-    print(
-        f"report written: {path} ({len(red_r0)} r0-red, {len(red_r1)} r1-red, {len(red_r2)} r2-red, "
-        f"{len(red_r3)} r3-red, {len(yel_r4)} r4-yellow, {len(yel)} yellow, {len(low)} green)"
-    )
+    lines.append("## 深度检查（利润质量 / 资产现金流 / 结构异常）")
+    if r.deep_checks:
+        for c in r.deep_checks:
+            lines.append(f"- [{c['level']}] {c['name']}：{c['detail']}")
+    else:
+        lines.append("- 数据不足，跳过")
+    return "\n".join(lines)
 
 
-def run_baolei(*, all_mode: bool = False, codes: str = "", self_test: bool = False, report: str = "", db_path: str | None = None, repository=None) -> dict[str, object]:
-    """baolei CLI 逻辑入口（由 app.cli 分发）。"""
+def run_baolei(*, codes: str = "", self_test: bool = False, report: str = "", db_path: str | None = None, repository=None) -> dict[str, object]:
+    """baolei CLI 逻辑入口（由 app.cli 分发）。按需指定股票排雷，不做全市场扫描。"""
     if self_test:
         test_codes = ["000001.SZ", "000002.SZ", "000008.SZ"]
         by_code, basic_map, audit_map, trend_map = bulk_fetch(db_path)
@@ -512,48 +670,31 @@ def run_baolei(*, all_mode: bool = False, codes: str = "", self_test: bool = Fal
         for code in test_codes:
             if code in by_code:
                 r = evaluate(code, basic_map.get(code, {}), by_code[code], audit_map, trend_map.get(code))
-                print(f"{code} {r.name}: 评级={r.rating} 零={r.r0}({r.r0_detail}) 一={r.r1}({r.r1_detail}) 二={r.r2}({r.r2_detail}) 三={r.r3}({r.r3_detail}) 四={r.r4}({r.r4_detail})")
-                payload["results"].append({"ts_code": code, "rating": r.rating, "r0": r.r0, "r1": r.r1, "r2": r.r2, "r3": r.r3, "r4": r.r4})
+                print(f"{code} {r.name}: 评级={r.rating} 零={r.r0}({r.r0_detail}) 一={r.r1}({r.r1_detail}) 二={r.r2}({r.r2_detail}) 三={r.r3}({r.r3_detail}) 四={r.r4}({r.r4_detail}) 深度={len(r.deep_checks)}项")
+                payload["results"].append({"ts_code": code, "rating": r.rating, "r0": r.r0, "r1": r.r1, "r2": r.r2, "r3": r.r3, "r4": r.r4, "deep_checks": r.deep_checks})
             else:
                 print(f"{code}: 无年报数据")
                 payload["results"].append({"ts_code": code, "rating": None})
         return payload
 
-    if codes:
-        code_list = [c.strip() for c in codes.split(",") if c.strip()]
-        by_code, basic_map, audit_map, trend_map = bulk_fetch(db_path)
-        payload = {"ok": True, "mode": "codes", "results": []}
-        for code in code_list:
-            if code in by_code:
-                r = evaluate(code, basic_map.get(code, {}), by_code[code], audit_map, trend_map.get(code))
-                print(f"{code} {r.name}: 评级={r.rating} | 零={r.r0} {r.r0_detail} | 一={r.r1} {r.r1_detail} | 二={r.r2} {r.r2_detail} | 三={r.r3} {r.r3_detail} | 四={r.r4} {r.r4_detail}")
-                payload["results"].append({"ts_code": code, "name": r.name, "rating": r.rating, "r0": r.r0, "r1": r.r1, "r2": r.r2, "r3": r.r3, "r4": r.r4, "reasons": r.reasons})
-            else:
-                print(f"{code}: 无年报数据")
-                payload["results"].append({"ts_code": code, "rating": None})
-        return payload
+    if not codes:
+        raise DataInsufficientError("baolei 需要 --codes 指定股票（逗号分隔）或 --self-test", hint="示例：--codes 600519.SH,000001.SZ")
 
-    if all_mode:
-        results = run_all(db_path)
-        if report:
-            generate_markdown(results, report)
-            return {"ok": True, "mode": "all", "report_path": str(Path(report).resolve()), "count": len(results)}
-        c, r0c, r1c, r2c, r3c, r4c = summarize(results)
-        print(f"扫描股票数: {len(results)}")
-        print("综合暴雷可能性:", dict(c))
-        print("雷区零(审计意见):", dict(r0c))
-        print("雷区一(利润结构):", dict(r1c))
-        print("雷区二(现金流):", dict(r2c))
-        print("雷区三(商誉):", dict(r3c))
-        print("雷区四(业绩拐点):", dict(r4c))
-        red = [r for r in results if r.rating == "高"]
-        yel = [r for r in results if r.rating == "中"]
-        print(f"\n=== 高暴雷风险(红) 共 {len(red)} 只 ===")
-        for r in sorted(red, key=lambda x: (x.r0 != RED, x.r2 != RED, x.r1 != RED, x.r3 != RED, x.name)):
-            print(f"{r.ts_code} {r.name} [{r.industry}] {r.reasons}")
-        print(f"\n=== 中风险(黄) 共 {len(yel)} 只 ===")
-        for r in sorted(yel, key=lambda x: x.name):
-            print(f"{r.ts_code} {r.name} [{r.industry}] {r.reasons}")
-        return {"ok": True, "mode": "all", "count": len(results), "rating_counts": dict(c), "r0_counts": dict(r0c), "r1_counts": dict(r1c), "r2_counts": dict(r2c), "r3_counts": dict(r3c), "r4_counts": dict(r4c)}
-
-    raise DataInsufficientError("baolei 需要 --self-test / --codes / --all 之一", hint="示例：--codes 600519.SH,000001.SZ")
+    code_list = [c.strip() for c in codes.split(",") if c.strip()]
+    by_code, basic_map, audit_map, trend_map = bulk_fetch(db_path)
+    payload = {"ok": True, "mode": "codes", "results": []}
+    reports = []
+    for code in code_list:
+        if code in by_code:
+            r = evaluate(code, basic_map.get(code, {}), by_code[code], audit_map, trend_map.get(code))
+            print(f"{code} {r.name}: 评级={r.rating} | 零={r.r0} | 一={r.r1} | 二={r.r2} | 三={r.r3} | 四={r.r4} | 深度={len(r.deep_checks)}项")
+            reports.append(_format_report(r))
+            payload["results"].append({"ts_code": code, "name": r.name, "rating": r.rating, "r0": r.r0, "r1": r.r1, "r2": r.r2, "r3": r.r3, "r4": r.r4, "deep_checks": r.deep_checks, "reasons": r.reasons})
+        else:
+            print(f"{code}: 无年报数据")
+            payload["results"].append({"ts_code": code, "rating": None})
+    if report:
+        with open(report, "w", encoding="utf-8") as f:
+            f.write("\n\n".join(reports))
+        payload["report_path"] = str(Path(report).resolve())
+    return payload
