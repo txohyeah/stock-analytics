@@ -157,34 +157,69 @@ def bulk_fetch(db_path: str | Path | None = None) -> tuple[dict[str, list], dict
 
     # 合并表：以 income 行打底，按 (ts_code, end_date) 聚合
     merged: dict[tuple[str, str], dict[str, Any]] = {}
-    for r in rows_income:
-        key = (r["ts_code"], r["end_date"])
-        merged.setdefault(key, {"ts_code": r["ts_code"], "end_date": r["end_date"], "ann_date": r["ann_date"]})
-        d = merged[key]
-        if r["ann_date"] and (not d.get("ann_date") or r["ann_date"] >= d["ann_date"]):
-            d["ann_date"] = r["ann_date"]
-        d["n_income"] = r["n_income"]
-        d["n_income_attr_p"] = r["n_income_attr_p"]
-        d["revenue"] = r["revenue"]
-        d["fv_value_chg_gain"] = r["fv_value_chg_gain"]
-        d["invest_income"] = r["invest_income"]
-        d["rd_exp"] = r["rd_exp"]
-        d["n_oth_income"] = r["n_oth_income"]
-        d["assets_impair_loss"] = r["assets_impair_loss"]
+    # 合并表：按 (ts_code, end_date) 聚合四张表。
+    # 同一报告期在 tushare 里可能有多个 ann_date（业绩快报、年报更正等），其中
+    # 部分行只填主键、其余字段为空。原实现按 SQL 返回顺序无条件赋值，等价于
+    # "最后一行赢"，而"最后一行"取决于查询计划（走索引还是全表扫），一旦取到空壳行
+    # 就把真实数据读成 None。改为按公告日升序遍历、只接受有值的字段：每列取
+    # "最新公告里非空的那个值"，空壳行再也盖不掉真实数据，且不再依赖返回顺序。
+    merged: dict[tuple[str, str], dict[str, Any]] = {}
     for src, tags in (
+        (
+            rows_income,
+            (
+                "n_income",
+                "n_income_attr_p",
+                "revenue",
+                "fv_value_chg_gain",
+                "invest_income",
+                "rd_exp",
+                "n_oth_income",
+                "assets_impair_loss",
+            ),
+        ),
         (rows_cf, ("n_cashflow_act", "c_fr_sale_sg")),
-        (rows_bs, ("goodwill", "total_hldr_eqy_exc_min_int", "inventories", "payroll_payable", "money_cap", "st_borr", "lt_borr", "bond_payable")),
-        (rows_fina, ("profit_dedt", "dt_netprofit_yoy", "netprofit_yoy", "netprofit_margin", "grossprofit_margin", "turn_days", "interestdebt", "debt_to_assets")),
+        (
+            rows_bs,
+            (
+                "goodwill",
+                "total_hldr_eqy_exc_min_int",
+                "inventories",
+                "payroll_payable",
+                "money_cap",
+                "st_borr",
+                "lt_borr",
+                "bond_payable",
+            ),
+        ),
+        (
+            rows_fina,
+            (
+                "profit_dedt",
+                "dt_netprofit_yoy",
+                "netprofit_yoy",
+                "netprofit_margin",
+                "grossprofit_margin",
+                "turn_days",
+                "interestdebt",
+                "debt_to_assets",
+            ),
+        ),
     ):
-        for r in src:
+        for r in sorted(src, key=lambda x: str(x["ann_date"] or "")):
             key = (r["ts_code"], r["end_date"])
             d = merged.get(key)
             if d is None:
-                d = merged.setdefault(key, {"ts_code": r["ts_code"], "end_date": r["end_date"], "ann_date": r["ann_date"]})
+                d = merged[key] = {
+                    "ts_code": r["ts_code"],
+                    "end_date": r["end_date"],
+                    "ann_date": r["ann_date"],
+                }
             if r["ann_date"] and (not d.get("ann_date") or r["ann_date"] >= d["ann_date"]):
                 d["ann_date"] = r["ann_date"]
             for tag in tags:
-                d[tag] = r[tag]
+                if _present(r[tag]):
+                    d[tag] = r[tag]
 
     basic_map = {r["ts_code"]: dict(r) for r in basic}
     by_code: dict[str, list] = defaultdict(list)
@@ -193,6 +228,21 @@ def bulk_fetch(db_path: str | Path | None = None) -> tuple[dict[str, list], dict
     for code in by_code:
         by_code[code].sort(key=lambda x: str(x["end_date"]), reverse=True)
     return by_code, basic_map, audit_map, trend_map
+
+
+def _present(v: Any) -> bool:
+    """字段是否"有值"。None、空串、纯空白、NaN 都算缺失。
+
+    用于同一报告期多公告日的归并：只有"有值"的字段才允许覆盖已有值，
+    空壳行（tushare 对某些 ann_date 只填主键）不能把真实数据抹掉。
+    """
+    if v is None:
+        return False
+    if isinstance(v, str):
+        return v.strip() != ""
+    if isinstance(v, float):
+        return v == v  # 过滤 NaN
+    return True
 
 
 def _to_float(v: Any) -> float | None:
