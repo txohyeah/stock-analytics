@@ -332,6 +332,15 @@ _HTML_CSS = """
 """
 
 
+# 单位换算常量。本模块同时处理两种金额口径，混用会差 1 万倍，所以各自命名、不许裸写数字：
+#   fund_holdings.hold_amount          —— 单位「万元」（东财 ccs 字段），万元 → 亿元 除 1e4
+#   top10_holders.hold_amount × close  —— 单位「元」（股数 × 收盘价），元   → 亿元 除 1e8
+# 2026-09-15 修复：展示「社保/汇金行业市值」时误用了 _YI_PER_WAN，把元当万元换算，
+# 结果数字被放大约 1 万倍（示例：真实 8.5 亿会显示成 85000.0 亿）。
+_YI_PER_WAN = 1e4
+_YI_PER_YUAN = 1e8
+
+
 def _esc(s) -> str:
     import html as _html
     return _html.escape(str(s), quote=True)
@@ -371,7 +380,7 @@ def report_html(conn, end_date: str, prev_date: str | None = None) -> str:
             rows.append(
                 f"<tr><td>{_esc(r.industry)}</td>"
                 f"<td><span class='sm-bar'><i style='width:{bar_w:.0f}%'></i></span>{pct:.1f}%</td>"
-                f"<td class='num'>{r.amount / 1e4:.1f} 亿</td></tr>"
+                f"<td class='num'>{r.amount / _YI_PER_WAN:.1f} 亿</td></tr>"
             )
         ind_html = f"""
 <div class="sm-section"><h3>公募行业配置（持仓市值加权）</h3><div class="panel">
@@ -420,7 +429,7 @@ def report_html(conn, end_date: str, prev_date: str | None = None) -> str:
         for r in flow["industry"].head(8).itertuples():
             rows.append(
                 f"<tr><td>{_esc(r.industry)}</td>"
-                f"<td class='num'>{r.amount / 1e4:.1f} 亿</td>"
+                f"<td class='num'>{r.amount / _YI_PER_YUAN:.1f} 亿</td>"
                 f"<td class='num'>{r.ratio:.1%}</td></tr>"
             )
         chg_items = ""
