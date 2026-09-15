@@ -8,8 +8,13 @@ Design:
     ALTER TABLE ADD COLUMN automatically so old rows are preserved.
   * Upserts use:
       sqlite: INSERT ... ON CONFLICT(...) DO UPDATE SET ...
-      mysql : INSERT ... ON DUPLICATE KEY UPDATE ...
+      mysql : INSERT INTO ... ON DUPLICATE KEY UPDATE ...
     Both are idempotent and safe to re-run.
+  * On conflict every non-key column is written as
+    COALESCE(<incoming>, <existing>), so an incoming NULL/NaN keeps the stored
+    value instead of erasing it. Tushare returns partial payloads (duplicate
+    rows, incremental corrections) where a blank field must not be read as
+    "this value is now empty" — for these datasets NULL means "not reported".
 """
 from __future__ import annotations
 
@@ -207,8 +212,10 @@ class SqliteStore(RowStore):
         sql = f"INSERT INTO {_quote_ident(self.driver, table)} ({col_list}) VALUES ({placeholders})"
         if update_cols:
             uniq = ",".join(_quote_ident(self.driver, c) for c in unique_columns)
+            table_ref = _quote_ident(self.driver, table)
             setters = ",".join(
-                f"{_quote_ident(self.driver, c)} = excluded.{_quote_ident(self.driver, c)}"
+                f"{_quote_ident(self.driver, c)} = COALESCE(excluded.{_quote_ident(self.driver, c)}, "
+                f"{table_ref}.{_quote_ident(self.driver, c)})"
                 for c in update_cols
             )
             sql += f" ON CONFLICT ({uniq}) DO UPDATE SET {setters}"
@@ -291,8 +298,10 @@ class MysqlStore(RowStore):
         placeholders = ",".join("%s" for _ in columns)
         sql = f"INSERT INTO {_quote_ident(self.driver, table)} ({col_list}) VALUES ({placeholders})"
         if update_cols:
+            table_ref = _quote_ident(self.driver, table)
             setters = ",".join(
-                f"{_quote_ident(self.driver, c)} = VALUES({_quote_ident(self.driver, c)})"
+                f"{_quote_ident(self.driver, c)} = COALESCE(VALUES({_quote_ident(self.driver, c)}), "
+                f"{table_ref}.{_quote_ident(self.driver, c)})"
                 for c in update_cols
             )
             sql += f" ON DUPLICATE KEY UPDATE {setters}"

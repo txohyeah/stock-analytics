@@ -75,6 +75,12 @@ class Settings:
     sync_retry_times: int = 3
     sync_retry_backoff_seconds: float = 2
     sync_request_interval_seconds: float = 0.35
+    # Tushare caps each interface at a calls-per-minute rate (2000 credits:
+    # 200/min per API) and answers an overrun with "每分钟最多访问该接口200次".
+    # Such an error needs to wait out the whole minute window, not the short
+    # generic backoff, otherwise the retry walks straight back into the cap.
+    sync_rate_limit_wait_seconds: float = 60
+    sync_rate_limit_retry_times: int = 3
     sync_lookback_days: int = 5
     finance_lookback_days: int = 30
     enable_fallback: bool = True
@@ -117,6 +123,8 @@ def get_settings() -> Settings:
         sync_retry_times=_int_env("SYNC_RETRY_TIMES", 3),
         sync_retry_backoff_seconds=_float_env("SYNC_RETRY_BACKOFF_SECONDS", 2),
         sync_request_interval_seconds=_float_env("SYNC_REQUEST_INTERVAL_SECONDS", 0.35),
+        sync_rate_limit_wait_seconds=_float_env("SYNC_RATE_LIMIT_WAIT_SECONDS", 60),
+        sync_rate_limit_retry_times=_int_env("SYNC_RATE_LIMIT_RETRY_TIMES", 3),
         sync_lookback_days=_int_env("SYNC_LOOKBACK_DAYS", 5),
         finance_lookback_days=_int_env("FINANCE_LOOKBACK_DAYS", 30),
         enable_fallback=_bool_env("ENABLE_FALLBACK", True),

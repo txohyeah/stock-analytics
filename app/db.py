@@ -1,12 +1,15 @@
 """Database helpers on top of RowStore (sqlite/mysql)."""
 from __future__ import annotations
 
+import logging
 from typing import Iterable
 
 import pandas as pd
 
 from app.config import Settings
 from app.storage import RowStore, create_store
+
+logger = logging.getLogger(__name__)
 
 SYNC_RUN_DDL = """
 CREATE TABLE IF NOT EXISTS sync_run (
@@ -67,6 +70,50 @@ def read_stock_codes(store: RowStore) -> list[str]:
     return [str(r[0]) for r in rows]
 
 
+def merge_duplicate_keys(df: pd.DataFrame, unique_columns: Iterable[str]) -> pd.DataFrame:
+    """Collapse rows sharing the same unique key into a single merged row.
+
+    Tushare sometimes returns several rows for one primary key where only one
+    of them carries real values and the others repeat the key with an empty
+    payload (e.g. fina_indicator returns a duplicate row for the same
+    ts_code/end_date/ann_date with profit_dedt = NaN). Upserting them in order
+    lets the empty row overwrite the good one, silently blanking columns.
+
+    Merge instead: pick the row with the most populated fields as the base and
+    fill its gaps from the sibling rows, so the result does not depend on the
+    order tushare happened to return rows in. A no-op when no key repeats.
+    """
+    keys = [col for col in unique_columns if col in df.columns]
+    if not keys or not df.duplicated(subset=keys).any():
+        return df
+    # Collapse each key group column-wise: transform("first") hands every row
+    # the group's first non-null value per column, so all rows of a group end up
+    # identical and the first one can be kept. The most-populated row is sorted
+    # first, which makes that value prefer the fullest sibling. Vectorised on
+    # purpose: groupby(...).first() fragments wide tushare frames and is much
+    # slower, and groupby(...).ffill() is not equivalent (it cannot fill gaps in
+    # the first row of a group).
+    ordered = (
+        df.assign(_populated=df.notna().sum(axis=1))
+        .sort_values("_populated", ascending=False, kind="stable")
+        .reset_index(drop=True)
+    )
+    non_key = [col for col in ordered.columns if col not in keys]
+    filled = ordered.groupby(keys, sort=False, dropna=False)[non_key].transform("first")
+    merged = (
+        pd.concat([ordered[keys], filled], axis=1)
+        .drop_duplicates(subset=keys, keep="first")
+        .drop(columns="_populated")
+    )
+    logger.info(
+        "merged duplicate primary keys: %s rows -> %s rows (key=%s)",
+        len(df),
+        len(merged),
+        ",".join(keys),
+    )
+    return merged[list(df.columns)]
+
+
 def upsert_dataframe(
     store: RowStore,
     table_name: str,
@@ -75,9 +122,17 @@ def upsert_dataframe(
     batch_size: int,
 ) -> int:
     """Ensure the table exists (schema inferred from tushare columns) and
-    upsert the given DataFrame idempotently. Returns affected row count."""
+    upsert the given DataFrame idempotently. Returns affected row count.
+
+    Duplicate primary keys inside *df* are merged first (see
+    merge_duplicate_keys); on conflict the store keeps the existing value when
+    the incoming one is NULL, so a partial payload never erases good data.
+    """
     if df.empty:
         return 0
+
+    unique_columns = list(unique_columns)
+    df = merge_duplicate_keys(df, unique_columns)
 
     unique_set = set(unique_columns)
     columns = list(df.columns)
