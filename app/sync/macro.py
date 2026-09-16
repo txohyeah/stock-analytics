@@ -39,6 +39,11 @@ _ECO_CAL_ROW_CAP = 100
 # 因此用标题前缀做收口过滤。
 _CN_EVENT_PREFIX = "中国"
 
+# eco_cal 里包含**未来已排期**的数据发布（值为空，如"中国央行贷款市场报价利率(LPR)(九月)"），
+# 每次同步都顺带把未来这段时间的日程拉回来，供"发布日程"用（否则 5 天回看的增量窗口
+# 永远看不到未来事件）。事件正式公布后，同一主键的行会被 upsert 补上实际值。
+_FORWARD_DAYS = 45
+
 
 def filter_cn_events(frame: pd.DataFrame) -> pd.DataFrame:
     """丢掉 eco_cal 里被错标成中国的境外事件行。"""
@@ -118,14 +123,23 @@ def enrich_eco_cal(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def sync_macro_calendar(ctx, dataset, start_date: str, end_date: str, ts_code: str | None) -> tuple[int, int]:
-    """按自然月分块拉取 eco_cal，解析数值后幂等 upsert 到 macro_calendar。"""
+    """按自然月分块拉取 eco_cal，解析数值后幂等 upsert 到 macro_calendar。
+
+    实际拉取区间 = [start_date, max(end_date, 今天 + _FORWARD_DAYS)]：
+    多出来的"前瞻窗口"用来收集**未来已排期的发布日程**（值为空），
+    等数据正式公布后同主键的行会被补上实际值。
+    """
     from app.sync.base import upsert  # 延迟导入避免与 base 循环依赖
 
     del ts_code
+    forward_end = (datetime.now() + timedelta(days=_FORWARD_DAYS)).strftime("%Y%m%d")
+    fetch_end = max(end_date, forward_end)
+    if fetch_end != end_date:
+        logger.info("macro_calendar: 前瞻窗口 %s → %s（未来 %d 天日程）", end_date, fetch_end, _FORWARD_DAYS)
     params = dict(dataset.default_params or {})
     fetched = 0
     affected = 0
-    for chunk_start, chunk_end in _month_chunks(start_date, end_date):
+    for chunk_start, chunk_end in _month_chunks(start_date, fetch_end):
         frame = ctx.client.query(dataset.api_name, start_date=chunk_start, end_date=chunk_end, **params)
         if frame is None or frame.empty:
             continue
