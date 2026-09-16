@@ -81,6 +81,28 @@ DATASETS: dict[str, Dataset] = {
         ("fund_code", "ts_code", "end_date"),
         "fund_holdings",
     ),
+    # ---- 宏观（2026-09-16 新增，见 memory/2026-09-16/macro-data-sources.md）----
+    # 月度序列：历史总量仅数百行，走 basic 策略一次全量拉取 + 幂等 upsert
+    # （sf_month 实测传 start_month 会被忽略、仍返回全量，所以不加日期参数）
+    "sf_month": Dataset("sf_month", "sf_month", "sf_month", ("month",), "basic"),
+    "cn_m": Dataset("cn_m", "cn_m", "cn_m", ("month",), "basic"),
+    "cn_cpi": Dataset("cn_cpi", "cn_cpi", "cn_cpi", ("month",), "basic"),
+    "cn_ppi": Dataset("cn_ppi", "cn_ppi", "cn_ppi", ("month",), "basic"),
+    "cn_gdp": Dataset("cn_gdp", "cn_gdp", "cn_gdp", ("quarter",), "basic"),
+    # 宏观发布日历 = "预期差"来源：value(实际)/fore_value(市场预期)/pre_value(上月实际)
+    # eco_cal 单次最多 100 行（宽区间会被静默截断）→ macro_calendar 策略按自然月分块 + 数值解析
+    "macro_calendar": Dataset(
+        "macro_calendar",
+        "eco_cal",
+        "macro_calendar",
+        ("date", "time", "country", "event"),
+        "macro_calendar",
+        {"country": "中国"},
+    ),
+    # 日频资金面/杠杆资金（按日期区间增量拉取）
+    "shibor": Dataset("shibor", "shibor", "shibor", ("date",), "date_range"),
+    "margin": Dataset("margin", "margin", "margin", ("trade_date", "exchange_id"), "date_range"),
+    "moneyflow_hsgt": Dataset("moneyflow_hsgt", "moneyflow_hsgt", "moneyflow_hsgt", ("trade_date",), "date_range"),
 }
 
 BOOTSTRAP_ORDER = ("trade_cal", "stock_basic")
@@ -102,6 +124,12 @@ DAILY_ORDER = (
 
 FINANCE_ORDER = ("fina_indicator", "income", "balancesheet", "cashflow")
 
+# 宏观：月度序列（对应研报里常见的"社融/信贷/M2/CPI/PPI"核对）
+MACRO_MONTHLY_ORDER = ("sf_month", "cn_m", "cn_cpi", "cn_ppi", "cn_gdp")
+# 宏观：日频（发布日历 + 资金面/杠杆资金），不依赖交易日历（宏观数据周末也会公布）
+MACRO_DAILY_ORDER = ("macro_calendar", "shibor", "margin", "moneyflow_hsgt")
+MACRO_ORDER = MACRO_MONTHLY_ORDER + MACRO_DAILY_ORDER
+
 ALL_ORDER = DAILY_ORDER + FINANCE_ORDER
 
 
@@ -120,4 +148,10 @@ def datasets_for(name: str) -> list[Dataset]:
         return [DATASETS[item] for item in DAILY_ORDER]
     if name == "finance_group":
         return [DATASETS[item] for item in FINANCE_ORDER]
+    if name == "macro":
+        return [DATASETS[item] for item in MACRO_ORDER]
+    if name == "macro_monthly":
+        return [DATASETS[item] for item in MACRO_MONTHLY_ORDER]
+    if name == "macro_daily":
+        return [DATASETS[item] for item in MACRO_DAILY_ORDER]
     return [get_dataset(name)]

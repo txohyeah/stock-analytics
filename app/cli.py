@@ -24,7 +24,14 @@ from app.db import get_store
 from app.notifier import send_text
 from app.providers import FallbackProvider
 from app.sync.base import SyncContext, is_trade_day_today, lookback_start, run_dataset, run_many, today_yyyymmdd
-from app.sync.registry import DATASETS, DAILY_ORDER, FINANCE_ORDER, datasets_for
+from app.sync.registry import (
+    DATASETS,
+    DAILY_ORDER,
+    FINANCE_ORDER,
+    MACRO_DAILY_ORDER,
+    MACRO_MONTHLY_ORDER,
+    datasets_for,
+)
 from app.tushare_client import TushareClient
 
 logging.basicConfig(
@@ -36,6 +43,10 @@ logger = logging.getLogger(__name__)
 GROUPS = {
     "market": DAILY_ORDER,
     "finance": FINANCE_ORDER,
+    # 宏观（2026-09-16 新增）：月度序列 + 日频发布日历/资金面
+    "macro_monthly": MACRO_MONTHLY_ORDER,
+    "macro_daily": MACRO_DAILY_ORDER,
+    "macro": MACRO_MONTHLY_ORDER + MACRO_DAILY_ORDER,
 }
 
 

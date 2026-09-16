@@ -14,6 +14,7 @@ from app.config import Settings
 from app.db import read_stock_codes, read_trade_dates, upsert_dataframe
 from app.providers import FallbackProvider
 from app.storage import RowStore
+from app.sync.macro import sync_macro_calendar
 from app.tushare_client import TushareClient
 
 logger = logging.getLogger(__name__)
@@ -442,6 +443,8 @@ STRATEGIES: dict[str, SyncFunction] = {
     "holders": sync_by_period_paged,
     "fund_basic_paged": sync_fund_basic_paged,
     "fund_holdings": sync_fund_holdings,
+    # 宏观发布日历：按自然月分块 + 数值/预期差解析（实现见 app/sync/macro.py）
+    "macro_calendar": sync_macro_calendar,
 }
 
 
