@@ -103,6 +103,27 @@ DATASETS: dict[str, Dataset] = {
     "shibor": Dataset("shibor", "shibor", "shibor", ("date",), "date_range"),
     "margin": Dataset("margin", "margin", "margin", ("trade_date", "exchange_id"), "date_range"),
     "moneyflow_hsgt": Dataset("moneyflow_hsgt", "moneyflow_hsgt", "moneyflow_hsgt", ("trade_date",), "date_range"),
+    # ---- 外部条件变量（2026-09-16 新增，见 specs/macro-data.md §8）----
+    # 外盘原油：tushare 无权限（index_global 只有股指、fut_basic(IPE/NYMEX) 为空），
+    # 改走新浪全球期货日线（strategy=sina_oil，非 tushare 通道）→ 表 oil_global(symbol=BRENT/WTI)
+    "oil_global": Dataset(
+        "oil_global",
+        "",
+        "oil_global",
+        ("symbol", "date"),
+        "sina_oil",
+    ),
+    # 美国国债收益率曲线（美元定价锚，含 y10/y2）——文章"降息/加息通道"的直接可测项
+    "us_tycr": Dataset("us_tycr", "us_tycr", "us_tycr", ("date",), "date_range"),
+    # 离岸人民币汇率（USDCNH）——文章传导链"美债利率↓→人民币升值预期→北向回流"的中段变量
+    "fx_daily": Dataset(
+        "fx_daily",
+        "fx_daily",
+        "fx_daily",
+        ("ts_code", "trade_date"),
+        "date_range",
+        {"ts_code": "USDCNH.FXCM"},
+    ),
 }
 
 BOOTSTRAP_ORDER = ("trade_cal", "stock_basic")
@@ -126,8 +147,8 @@ FINANCE_ORDER = ("fina_indicator", "income", "balancesheet", "cashflow")
 
 # 宏观：月度序列（对应研报里常见的"社融/信贷/M2/CPI/PPI"核对）
 MACRO_MONTHLY_ORDER = ("sf_month", "cn_m", "cn_cpi", "cn_ppi", "cn_gdp")
-# 宏观：日频（发布日历 + 资金面/杠杆资金），不依赖交易日历（宏观数据周末也会公布）
-MACRO_DAILY_ORDER = ("macro_calendar", "shibor", "margin", "moneyflow_hsgt")
+# 宏观：日频（发布日历 + 资金面/杠杆资金 + 外部条件变量），不依赖交易日历（宏观数据周末也会公布）
+MACRO_DAILY_ORDER = ("macro_calendar", "shibor", "margin", "moneyflow_hsgt", "oil_global", "us_tycr", "fx_daily")
 MACRO_ORDER = MACRO_MONTHLY_ORDER + MACRO_DAILY_ORDER
 
 ALL_ORDER = DAILY_ORDER + FINANCE_ORDER

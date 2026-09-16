@@ -15,6 +15,7 @@ from app.db import read_stock_codes, read_trade_dates, upsert_dataframe
 from app.providers import FallbackProvider
 from app.storage import RowStore
 from app.sync.macro import sync_macro_calendar
+from app.sync.oil import sync_sina_oil
 from app.tushare_client import TushareClient
 
 logger = logging.getLogger(__name__)
@@ -445,6 +446,8 @@ STRATEGIES: dict[str, SyncFunction] = {
     "fund_holdings": sync_fund_holdings,
     # 宏观发布日历：按自然月分块 + 数值/预期差解析（实现见 app/sync/macro.py）
     "macro_calendar": sync_macro_calendar,
+    # 外盘原油日线（新浪公开接口，非 tushare；实现见 app/sync/oil.py）
+    "sina_oil": sync_sina_oil,
 }
 
 

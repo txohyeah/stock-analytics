@@ -98,3 +98,33 @@ where event like '中国社会融资%' order by date desc limit 6;
 - **中债国债收益率曲线** `yc_cb`：token 无权限；
 - `cn_pmi`：接口存在但字段大面积 NaN，PMI 改用 eco_cal（财新 PMI 有实际/预期）；
 - `shibor_lpr`：有权限但**频次 1 次/小时**，未纳入定时。
+
+---
+
+## 8. 外部条件变量（0916 新增：原油 / 美债 / 汇率）
+
+站点"框架条件变量体检"要能对账文章《产业投资框架》第 1 节定下的触发条件
+（布伦特连续 30 个交易日站稳 95 美元 → 场景 B），所以补了三个 dataset。
+
+| dataset | api_name | 表 | 主键 | 源 | 缺口/坑 |
+|---|---|---|---|---|---|
+| `oil_global` | —（非 tushare） | `oil_global(symbol=BRENT/WTI, date, open, high, low, close, volume, source)` | (symbol, date) | **新浪财经全球期货日线** | 必须带 `Referer: https://finance.sina.com.cn`，否则 403 |
+| `us_tycr` | `us_tycr` | `us_tycr(date, y2, y10, …)` | (date,) | tushare 美国国债收益率曲线 | `date` 是 **YYYYMMDD**，非 ISO |
+| `fx_daily` | `fx_daily` | `fx_daily(ts_code, trade_date, bid_close, …)` | (ts_code, trade_date) | tushare 外汇日线（`USDCNH.FXCM`） | 同 YYYYMMDD |
+
+**为什么外盘原油不用 tushare（2026-09-16 实测）**：
+
+- `fut_daily(ts_code='SC.INE')` 只有**国内**原油（人民币元/桶，含关税+消费税，与布伦特有系统性价差，**不能直接当布伦特用**）；
+- `index_global` 只覆盖全球股指（HSI/SPX/N225…共 22 个代码），**没有任何原油**；
+- `fut_basic(exchange='IPE' / 'NYMEX')` 返回空 → 外盘期货根本无权限。
+
+→ 改用新浪（公开、免鉴权、**含 2016 年至今全历史**，日线一次 HTTP 拉全量）：
+`app/sync/oil.py::sync_sina_oil`，strategy 名 `sina_oil`（对应 `app/sync/base.py::STRATEGIES`）。
+落库 symbol 统一 `BRENT` / `WTI`；单次只 upsert 最近 400 天（`MIN_LOOKBACK_DAYS`），
+`--history --start 20160101` 才会灌全历史。
+
+**oil_global.date 是 ISO（2026-09-16）**，与 tushare 的 YYYYMMDD 不同 ——
+下游（`projects/stocks-site/scripts/sync_macro.py`）比对日期时要转换，别直接字符串比较。
+
+**核对（0916）**：布伦特连续 **12** 个交易日收盘 ≥95（2026-09-01 起），最新 107.76（09-16）；
+美债 10Y 年内 3.97%（1 月）→ **5.00%**（09-15）、2Y 4.67%；USDCNH 6.7126。
