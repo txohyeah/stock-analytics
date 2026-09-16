@@ -70,6 +70,10 @@ from macro_calendar
 where event like '中国社会融资%' order by date desc limit 6;
 ```
 
+⚠️ `shibor` 表的隔夜利率列名是 SQLite 保留字 `on`，必须加双引号：
+`select date, "on" from shibor order by date desc limit 1;`
+另：`moneyflow_hsgt.north_money` 单位是**万元**（/1e4 得亿元），`margin.rzye` 单位是**元**（/1e8 得亿元）。
+
 ## 6. 首次核对结论（0916 策略篇）
 
 | 项目 | 研报/爆款文 | 本地实测（macro_calendar） | 判定 |
