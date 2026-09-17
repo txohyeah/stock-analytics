@@ -1,0 +1,50 @@
+{
+  "_comment": [
+    "手工维护的美联储议息日程 + 决议结果（北京时间口径）。",
+    "为什么手工：tushare eco_cal 的行被 filter_cn_events() 按 '中国' 前缀过滤，美国议息事件进不了 macro_calendar。",
+    "怎么用：app/sync/macro.py 的 apply_fomc_events() 每次同步 macro_calendar 时把本文件幂等 upsert 进 macro_calendar（country='美国'，不覆盖任何中国事件行）。",
+    "决议公布后请把该次的 value / value_num 填上：站点侧 scripts/macro_note.py check 以 value_num 非空判定'已发布'，据此触发解读笔记（kind=release/fomc）。",
+    "time 一律用北京时间（美东 14:00 公布 → 夏令时北京次日 02:00、冬令时次日 03:00）。"
+  ],
+  "events": [
+    {
+      "date": "20260917",
+      "time": "02:00",
+      "event": "美国:FOMC议息决议(会议9月15-16日)",
+      "value": "3.75-4.00%",
+      "pre_value": "3.50-3.75%",
+      "fore_value": null,
+      "value_num": 4.0,
+      "pre_num": 3.5,
+      "fore_num": null,
+      "unit": "%",
+      "note": "12-0 全票加息 25bp（2023 年以来首次）；点阵图 2026/2027 年底中位 4.1%、长期中性 3.2%"
+    },
+    {
+      "date": "20261029",
+      "time": "02:00",
+      "event": "美国:FOMC议息决议(会议10月27-28日)",
+      "value": null,
+      "pre_value": "3.75-4.00%",
+      "fore_value": null,
+      "value_num": null,
+      "pre_num": 4.0,
+      "fore_num": null,
+      "unit": "%",
+      "note": "无点阵图（没有 SEP）；距美国中期选举仅数日，市场定价按兵不动约 64%"
+    },
+    {
+      "date": "20261210",
+      "time": "03:00",
+      "event": "美国:FOMC议息决议(会议12月8-9日)",
+      "value": null,
+      "pre_value": null,
+      "fore_value": null,
+      "value_num": null,
+      "pre_num": null,
+      "fore_num": null,
+      "unit": "%",
+      "note": "含点阵图（最重要的一次）；市场定价加息约 67%"
+    }
+  ]
+}

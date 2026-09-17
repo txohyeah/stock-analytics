@@ -23,6 +23,7 @@ from app.sync.macro import (  # noqa: E402
     _month_chunks,
     enrich_eco_cal,
     filter_cn_events,
+    load_fomc_events,
     parse_eco_value,
     unit_of,
 )
@@ -81,6 +82,22 @@ check("surprise = 实际-预期", enriched.iloc[0]["surprise"], -380.0e9)
 check("unit", enriched.iloc[0]["unit"], "B")
 empty = enrich_eco_cal(pd.DataFrame())
 check("空表不炸", len(empty), 0)
+
+print("== load_fomc_events: 手工维护的美联储议息日程 ==")
+# 语义：eco_cal 只留中国事件（美国议息进不来），故 fomc_events.json 自备；
+#       站点侧 macro_note.py check 以 value_num 非空判定"已发布"→ 触发解读笔记。
+fomc = load_fomc_events()
+check("条目数 >= 1", len(fomc) >= 1, True)
+check("列与 macro_calendar 对齐", tuple(fomc.columns), (
+    "date", "time", "country", "currency", "event",
+    "value", "pre_value", "fore_value", "value_num", "fore_num", "pre_num", "unit"))
+check("国家固定为美国", set(fomc["country"]), {"美国"})
+check("币种固定为 USD", set(fomc["currency"]), {"USD"})
+check("事件名不以'中国'开头（不会被 filter_cn_events 语义混淆）",
+      all(not str(e).startswith("中国") for e in fomc["event"]), True)
+resolved = fomc[fomc["value_num"].notna()]
+check("已决议的行填了 value_num（check 靠它触发笔记）", len(resolved) >= 1, True)
+check("未决议的行 value_num 为空", fomc["value_num"].isna().sum() >= 1, True)
 
 print()
 if failures:

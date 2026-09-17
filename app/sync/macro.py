@@ -19,8 +19,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import math
+import os
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -122,6 +124,54 @@ def enrich_eco_cal(frame: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+_FOMC_EVENTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fomc_events.json")
+
+# macro_calendar 的实际列（多余列会被 ensure_table 加进去，这里严格对齐）
+_FOMC_COLUMNS = (
+    "date", "time", "country", "currency", "event",
+    "value", "pre_value", "fore_value",
+    "value_num", "fore_num", "pre_num", "unit",
+)
+
+
+def load_fomc_events() -> pd.DataFrame:
+    """读手工维护的美联储议息日程（``fomc_events.json``，见其顶部说明）。
+
+    eco_cal 只保留 '中国' 前缀事件（见 ``filter_cn_events``），美国议息不在其内，
+    所以这张日程必须自备；决议公布后把该次的 ``value``/``value_num`` 填上即可。
+    """
+    if not os.path.isfile(_FOMC_EVENTS_PATH):
+        logger.warning("macro_calendar: 缺少 fomc_events.json，跳过美联储议息日程")
+        return pd.DataFrame(columns=list(_FOMC_COLUMNS))
+    with open(_FOMC_EVENTS_PATH, encoding="utf-8") as fh:
+        payload = json.load(fh)
+    rows = payload.get("events") or []
+    if not rows:
+        return pd.DataFrame(columns=list(_FOMC_COLUMNS))
+    frame = pd.DataFrame(rows)
+    frame["country"] = "美国"
+    frame["currency"] = "USD"
+    for column in _FOMC_COLUMNS:
+        if column not in frame.columns:
+            frame[column] = None
+    return frame[list(_FOMC_COLUMNS)]
+
+
+def apply_fomc_events(ctx, dataset) -> int:
+    """把美联储议息日程幂等 upsert 进 macro_calendar，返回受影响行数。"""
+    from app.sync.base import upsert  # 延迟导入避免与 base 循环依赖
+
+    frame = load_fomc_events()
+    if frame.empty:
+        return 0
+    affected = upsert(ctx, dataset, frame)
+    logger.info(
+        "macro_calendar: 美联储议息日程 %d 条（手工维护，eco_cal 不含美国事件）affected=%s",
+        len(frame), affected,
+    )
+    return affected
+
+
 def sync_macro_calendar(ctx, dataset, start_date: str, end_date: str, ts_code: str | None) -> tuple[int, int]:
     """按自然月分块拉取 eco_cal，解析数值后幂等 upsert 到 macro_calendar。
 
@@ -165,4 +215,6 @@ def sync_macro_calendar(ctx, dataset, start_date: str, end_date: str, ts_code: s
         fetched += len(frame)
         affected += upsert(ctx, dataset, frame)
         logger.info("macro_calendar %s..%s fetched=%s affected_total=%s", chunk_start, chunk_end, len(frame), affected)
+    # 中国事件之外，额外挂上手工维护的美联储议息日程（eco_cal 里没有美国事件）
+    affected += apply_fomc_events(ctx, dataset)
     return fetched, affected
