@@ -63,6 +63,7 @@ def universe(con, min_list_days: int) -> pd.DataFrame:
         con, params=(min_list_days,),
     )
     frame = frame[frame.delist_date.isna() | (frame.delist_date == "")]
+    frame = frame[~frame.ts_code.str.endswith(".BJ")]   # 2026-09-18 用户定：北交所不扫（30%涨跌停、流动性结构不同，结论不可迁移）
     return frame
 
 
