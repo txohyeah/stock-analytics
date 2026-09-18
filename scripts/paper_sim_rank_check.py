@@ -52,7 +52,8 @@ def main() -> None:
         "FROM trades t JOIN signal_pool s ON s.id=t.signal_id WHERE t.strategy='ignition'", con)
 
     pure = tr[~tr.ts_code.str.endswith(".BJ")].merge(sig, on=["ts_code", "signal_date"], how="left")
-    print(f"===== 已平仓·纯策略出场 {len(pure)} 笔（剔 .BJ；另 {len(tr)-len(pure)} 笔北交所剔除不计）=====")
+    n_bj = len(tr) - len(pure)
+    print(f"===== 已平仓·纯策略出场 {len(pure)} 笔（剔 .BJ 共 {n_bj} 笔：含北交所剔除清仓+存量 .BJ 正常出场）=====")
     print(pure.reason.value_counts().to_string().replace("\n", "、"))
     pure = pure.copy()
     pure["确认类"] = pure.apply(
