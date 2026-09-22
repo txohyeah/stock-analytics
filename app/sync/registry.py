@@ -43,8 +43,19 @@ DATASETS: dict[str, Dataset] = {
     "cashflow": Dataset("cashflow", "cashflow", "cashflow", ("ts_code", "end_date", "ann_date", "report_type"), "stock"),
     # 排雷审计意见（baolei 雷区零，按股全量拉：带日期会漏最新年报审计意见）
     "fina_audit": Dataset("fina_audit", "fina_audit", "fina_audit", ("ts_code", "end_date"), "stock_no_date"),
-    # 龙虎榜每日明细（lhb 信号，按交易日同步）
+    # 龙虎榜每日明细（lhb 信号，按交易日同步）。2026-09-22 纳入 market 组：
+    # 旧 stock_research 停用后此表无定时调度，数据曾断档（停在 2026-08-28）
     "top_list": Dataset("top_list", "top_list", "top_list", ("trade_date", "ts_code"), "trade_date"),
+    # 龙虎榜席位明细（营业部/机构逐条，side=0买入/1卖出，exalter=席位名）。
+    # 唯一键必须含金额列：同一榜单"机构专用"会多行出现（不同机构），
+    # (trade_date,ts_code,exalter,side,reason) 五列键实测单日 67 行撞车（2026-09-22）
+    "top_inst": Dataset(
+        "top_inst",
+        "top_inst",
+        "top_inst",
+        ("trade_date", "ts_code", "exalter", "side", "reason", "buy", "sell", "net_buy"),
+        "trade_date",
+    ),
     # 上市公司资料（主营/省份等，lhb 细分链归类用；basic 策略=单次全量拉取，需 2000 积分档）
     "stock_company": Dataset("stock_company", "stock_company", "stock_company", ("ts_code",), "basic"),
     # 三路聪明钱跟踪（2026-09-12 新增，见 specs/smart-money-tracking.md）
@@ -135,6 +146,9 @@ DAILY_ORDER = (
     "daily_basic",
     "adj_factor",
     "moneyflow",
+    # 龙虎榜：个股汇总（恢复调度）+ 席位明细（新增），盘后 20:10 拉取足够
+    "top_list",
+    "top_inst",
     "index_basic",
     "index_daily",
     "index_daily_basic",
