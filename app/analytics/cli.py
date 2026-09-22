@@ -28,6 +28,7 @@ from .baolei import run_baolei
 from .errors import AnalyticsError, UserInputError
 from .inputs import normalize_code
 from .lhb import run_lhb
+from .lhb_brief import run_lhb_brief
 from .lhb_dominant import run_lhb_dominant
 from .market_period_review import run_market_period_review
 from .market_review import run_market_review
@@ -382,6 +383,17 @@ def add_analytics_subparsers(sub) -> None:
     lhb_dom_parser.add_argument("--trade-date", type=str, default=None, help="交易日 YYYYMMDD（默认最近有数据交易日）")
     _db_arg(lhb_dom_parser)
     lhb_dom_parser.set_defaults(func=_lhb_dominant, _json=True)
+
+    def _lhb_brief(args: argparse.Namespace) -> dict[str, object]:
+        return run_lhb_brief(trade_date=args.trade_date, db_path=args.database)
+
+    lhb_brief_parser = sub.add_parser(
+        "lhb-brief",
+        help="龙虎榜信号推送版：超买/超卖 × 席位成分（游资/机构/北向）交叉分析",
+    )
+    lhb_brief_parser.add_argument("--trade-date", type=str, default=None, help="交易日 YYYYMMDD（默认最近有数据交易日）")
+    _db_arg(lhb_brief_parser)
+    lhb_brief_parser.set_defaults(func=_lhb_brief, _json=True)
 
     chart_parser = sub.add_parser("chart")
     chart_parser.add_argument("--code", required=True)
