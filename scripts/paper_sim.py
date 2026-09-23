@@ -312,6 +312,10 @@ def step(date: str) -> None:
     con = connect()
     scon = stock_con()
     # 1. pending 信号 → 决定建仓日并尝试建仓
+    # 已持仓不重复建仓（用户拍板 2026-09-23，口径 B2 历史保留）：持仓期间再出信号只留档
+    # 不买；检查时点=建仓日当天（entry_date 到达时按当时持仓状态判断）；先平仓后再出
+    # 信号允许再买。历史重复单不清算、照常推进到平仓。
+    held = {r[0] for r in con.execute("SELECT ts_code FROM signal_pool WHERE status='opened'")}
     for sig in con.execute("SELECT * FROM signal_pool WHERE status='pending'").fetchall():
         s = dict(zip([d[0] for d in con.execute("SELECT * FROM signal_pool LIMIT 0").description], sig))
         entry_date = s["entry_date"]
@@ -325,9 +329,15 @@ def step(date: str) -> None:
             con.execute("UPDATE signal_pool SET entry_date=? WHERE id=?", (entry_date, s["id"]))
         if entry_date > date:
             continue
+        if s["ts_code"] in held:                  # 建仓时点已持仓 → 不买
+            con.execute("UPDATE signal_pool SET status='skipped', skip_reason='已持仓不重复建仓' "
+                        "WHERE id=?", (s["id"],))
+            continue
         if not try_open(con, scon, s, entry_date):
             con.execute("UPDATE signal_pool SET status='skipped', skip_reason='次日停牌/无行情' "
                         "WHERE id=?", (s["id"],))
+        else:
+            held.add(s["ts_code"])
     con.commit()
 
     # 2. 推进持仓
@@ -422,11 +432,16 @@ def report(date: str) -> str:
                        (date,)).fetchone()[0]
     merged = con.execute("SELECT COUNT(*) FROM signal_pool WHERE signal_date=? AND "
                          "status='skipped' AND skip_reason='同票多策略合并'", (date,)).fetchone()[0]
+    held_skip = con.execute("SELECT COUNT(*) FROM signal_pool WHERE signal_date=? AND "
+                            "status='skipped' AND skip_reason='已持仓不重复建仓'",
+                            (date,)).fetchone()[0]
     notes = []
     if pend:
         notes.append(f"{pend} 笔涨幅>5% 待次日建仓")
     if merged:
         notes.append(f"{merged} 笔同票多策略合并（取最高档）")
+    if held_skip:
+        notes.append(f"{held_skip} 笔已持仓未重复建仓")
     if notes:
         out.append(f"（{'；'.join(notes)}）")
 
