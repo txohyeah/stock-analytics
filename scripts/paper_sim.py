@@ -355,6 +355,11 @@ def step(date: str) -> None:
     n_open = con.execute("SELECT COUNT(*) FROM signal_pool WHERE status='opened'").fetchone()[0]
     n_closed = con.execute("SELECT COUNT(*) FROM trades WHERE exit_date=?", (date,)).fetchone()[0]
     n_signals = con.execute("SELECT COUNT(*) FROM signal_pool WHERE signal_date=?", (date,)).fetchone()[0]
+    # 当日真实建仓数：entry_date 落在当天且确实开了仓（含其后已平的）。
+    # skipped（已持仓不重复建仓/停牌）也带 entry_date，必须排除——修复 2026-09-24：
+    # 原 INSERT 把 n_closed 写了两遍，n_opened 列从未被赋真值。
+    n_opened = con.execute("SELECT COUNT(*) FROM signal_pool WHERE entry_date=? "
+                           "AND status IN ('opened','closed')", (date,)).fetchone()[0]
     realized = con.execute("SELECT COALESCE(SUM(pnl),0) FROM trades").fetchone()[0]
     open_cost = con.execute("SELECT COALESCE(SUM(shares*entry_price_adj*(1+?)),0) "
                             "FROM signal_pool WHERE status='opened'", (FEE,)).fetchone()[0]
@@ -366,7 +371,7 @@ def step(date: str) -> None:
             open_value += s["shares"] * float(bars["close"].iloc[-1])
     con.execute("INSERT OR REPLACE INTO daily_snapshot (trade_date, n_signals, n_opened, n_closed, "
                 "realized_pnl, open_value, open_cost, n_open) VALUES (?,?,?,?,?,?,?,?)",
-                (date, n_signals, n_closed, n_closed, realized, open_value, open_cost, n_open))
+                (date, n_signals, n_opened, n_closed, realized, open_value, open_cost, n_open))
     con.commit()
     scon.close()
     con.close()
