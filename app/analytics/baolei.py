@@ -104,7 +104,7 @@ def bulk_fetch(db_path: str | Path | None = None) -> tuple[dict[str, list], dict
         )
         q_fina = (
             "SELECT ts_code, end_date, ann_date, profit_dedt, dt_netprofit_yoy, netprofit_yoy, "
-            "netprofit_margin, grossprofit_margin, turn_days, interestdebt, debt_to_assets FROM fina_indicator "
+            "netprofit_margin, grossprofit_margin, turn_days, interestdebt, debt_to_assets, extra_item FROM fina_indicator "
             "WHERE substr(end_date,5,4)='1231'"
         )
         rows_income = conn.execute(q_income).fetchall()
@@ -203,6 +203,7 @@ def bulk_fetch(db_path: str | Path | None = None) -> tuple[dict[str, list], dict
                 "turn_days",
                 "interestdebt",
                 "debt_to_assets",
+                "extra_item",
             ),
         ),
     ):
@@ -372,16 +373,23 @@ def _deep_checks(annual: list, trend: dict[str, Any] | None = None, industry: st
             checks.append({"name": "净资产侵蚀", "level": GREEN,
                            "detail": f"净资产 {eq/1e8:.2f}亿 ÷ 年亏损 {abs(ni)/1e8:.2f}亿 = 还能撑 {years:.1f} 年"})
 
-    # 7. 收现比（江波龙案例：收入 vs 实际收到现金）
+    # 7. 收现比（江波龙案例：收入 vs 实际收到现金；李神奇沈鼓案例：自身趋势变脸——
+    #    前两年收现比 0.9+，上市节骨眼钱收不回来。绝对值不低但骤降同样是回款恶化信号）
     sale_cash = _to_float(latest.get("c_fr_sale_sg"))
     if sale_cash is not None and rev is not None and rev > 0 and not is_fin:
         ratio = sale_cash / rev
+        hist_pairs = [(_to_float(r.get("c_fr_sale_sg")), _to_float(r.get("revenue"))) for r in annual[1:4]]
+        hist_r = [c / v for c, v in hist_pairs if c is not None and v and v > 0]
+        hist_avg = sum(hist_r) / len(hist_r) if len(hist_r) >= 2 else None
+        faceoff = hist_avg is not None and hist_avg >= 0.85 and ratio <= hist_avg - 0.20
+        face_note = f"；近{len(hist_r)}年均值 {hist_avg:.2f}，自身骤降（收现比变脸，回款恶化信号）" if faceoff else ""
         if ratio < 0.6:
             checks.append({"name": "收现比", "level": RED,
-                           "detail": f"销售收现 {sale_cash/1e8:.2f}亿 / 营收 {rev/1e8:.2f}亿 = {ratio:.2f}（<0.6，收入含金量差）"})
-        elif ratio < 0.8:
+                           "detail": f"销售收现 {sale_cash/1e8:.2f}亿 / 营收 {rev/1e8:.2f}亿 = {ratio:.2f}（<0.6，收入含金量差）{face_note}"})
+        elif ratio < 0.8 or faceoff:
+            note = f"（<0.8，需关注）" if ratio < 0.8 else f"（{ratio:.2f}，绝对值尚可但骤降）"
             checks.append({"name": "收现比", "level": YELLOW,
-                           "detail": f"销售收现 {sale_cash/1e8:.2f}亿 / 营收 {rev/1e8:.2f}亿 = {ratio:.2f}（0.6~0.8，需关注）"})
+                           "detail": f"销售收现 {sale_cash/1e8:.2f}亿 / 营收 {rev/1e8:.2f}亿 = {ratio:.2f}{note}{face_note}"})
         else:
             checks.append({"name": "收现比", "level": GREEN,
                            "detail": f"销售收现 {sale_cash/1e8:.2f}亿 / 营收 {rev/1e8:.2f}亿 = {ratio:.2f}（>=0.8，健康）"})
@@ -451,6 +459,45 @@ def _deep_checks(annual: list, trend: dict[str, Any] | None = None, industry: st
         if cur_np is not None and prev_np is not None and cur_np < 0 and prev_np > 0:
             checks.append({"name": "单季转负预警", "level": YELLOW,
                            "detail": f"{trend['latest_ed'][:4]}-{trend['latest_ed'][4:6]} 归母 {cur_np/1e8:.2f}亿 vs 去年同期 {prev_np/1e8:.2f}亿（上坡路企业单季转负，警惕后续动作）"})
+
+    # 13. 亏损年非经常性输血（李神奇三安案例：归母亏 3.53 亿但非经常性损益 +4.74 亿，
+    #     扣非真实亏 8.28 亿——补助/处置收益在掩盖主业失血。归母为正的场景已由雷区一覆盖）
+    if ni is not None and ni < 0 and not is_fin:
+        extra = _to_float(latest.get("extra_item"))  # 非经常性损益合计（fina_indicator）
+        if extra is not None and extra > 0:
+            pd_ = _to_float(latest.get("profit_dedt"))
+            true_loss = abs(pd_) if (pd_ is not None and pd_ < 0) else abs(ni) + extra
+            if extra >= abs(ni):
+                checks.append({"name": "亏损年非经常性输血", "level": RED,
+                               "detail": f"归母亏损 {abs(ni)/1e8:.2f}亿 但非经常性损益 +{extra/1e8:.2f}亿（≥亏损额），剔除输血后主业真实亏损约 {true_loss/1e8:.2f}亿（补助等在掩盖主业失血）"})
+            elif extra >= 0.5 * abs(ni):
+                checks.append({"name": "亏损年非经常性输血", "level": YELLOW,
+                               "detail": f"归母亏损 {abs(ni)/1e8:.2f}亿，非经常性损益 +{extra/1e8:.2f}亿 输血 {extra/abs(ni):.0%}，主业真实亏损约 {true_loss/1e8:.2f}亿"})
+            else:
+                checks.append({"name": "亏损年非经常性输血", "level": GREEN,
+                               "detail": f"归母亏损 {abs(ni)/1e8:.2f}亿，非经常性损益仅 +{extra/1e8:.2f}亿（亏损以主业为主）"})
+
+    # 14. 资产减值计提（李神奇三安案例：东西卖不动囤仓库，年底一刀切计提——
+    #     2025 减值 5.26 亿占营收 2.9% 且同比扩大 59%。注意 tushare 口径负数=损失；金融股信用减值是主业跳过）
+    imp = _to_float(latest.get("assets_impair_loss"))
+    if imp is not None and imp < 0 and rev is not None and rev > 0 and not is_fin:
+        imp_abs = abs(imp)
+        imp_ratio = imp_abs / rev
+        prev_imp = _to_float(prev.get("assets_impair_loss")) if prev else None
+        prev_rev_v = _to_float(prev.get("revenue")) if prev else None
+        prev_ratio = (abs(prev_imp) / prev_rev_v) if (prev_imp is not None and prev_imp < 0 and prev_rev_v and prev_rev_v > 0) else None
+        if imp_ratio >= 0.05:
+            checks.append({"name": "资产减值计提", "level": RED,
+                           "detail": f"资产减值损失 {imp_abs/1e8:.2f}亿 占营收 {imp_ratio:.1%}（≥5%，大额计提，年末一刀切风险）"})
+        elif imp_ratio >= 0.03:
+            checks.append({"name": "资产减值计提", "level": YELLOW,
+                           "detail": f"资产减值损失 {imp_abs/1e8:.2f}亿 占营收 {imp_ratio:.1%}（3%~5%，计提偏重）"})
+        elif imp_ratio >= 0.02 and prev_ratio is not None and imp_ratio >= prev_ratio * 1.3:
+            checks.append({"name": "资产减值计提", "level": YELLOW,
+                           "detail": f"资产减值损失 {imp_abs/1e8:.2f}亿 占营收 {imp_ratio:.1%}，较上年 {prev_ratio:.1%} 扩大 {imp_ratio/prev_ratio:.1f} 倍（计提扩大）"})
+        else:
+            checks.append({"name": "资产减值计提", "level": GREEN,
+                           "detail": f"资产减值损失 {imp_abs/1e8:.2f}亿 占营收 {imp_ratio:.1%}（正常）"})
 
     return checks
 
