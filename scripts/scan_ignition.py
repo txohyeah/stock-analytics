@@ -7,10 +7,15 @@
   1) 位置档位：A = 距60日高点<-40% 且 距60日低点>5%（历史单票胜率 73% 那一档）
                B = 只满足其中一条；C = 都不满足
      —— 位置条件在这里是**排序权重**，不是一票否决（回测已证明当否决用会让 71% 的票几年等不到一次信号）
-  2) 同档内两级排序（2026-09-18 定稿，8990 笔信号分层验证）：
-     ① 量能确认（量托/OBV金叉，4日窗口）在前 —— 有确认 f20 +8.9%/胜率65.8%，无 +4.2%/58.1%（独立回测同向）
-     ② 同级按「离底高度」（距60日低点%）降序 —— 全场区分度最大维度（8.6pp）：离底越高反弹越扎实，
-        刚爬离底 5~7% 的下跌中继组 +1.9%/胜率52%/20日内先止损率49%
+  2) 同档内三级排序：
+     ① 量能确认（量托/OBV金叉，4日窗口）在前 —— 2026-09-18 定稿，8990 笔分层验证：
+        有确认 f20 +8.9%/胜率65.8%，无 +4.2%/58.1%（独立回测同向）
+     ② 离底分档（2026-10-08 定稿，29,810 笔三维交叉表，见 tech_indicators.ignition.off_low_band）：
+        ②10~20% ≈ ③20~35%（已确认启动） > ①5~10%（刚触底） > ④>35%（沉底警示）
+        —— 离底在每个跌深档内部单调递增（控住跌深仍有 +3.68/+7.43/+8.68pp 独立增量），
+        但 >35% 档 8 年里只有 2 年为正、池化被 2024 一年拉正，故不再「越高越靠前」。
+        ⚠️ 该梯队优势只在大盘 MA60 下方成立 → 档位**只用于排序与标注，不当买入过滤**。
+     ③ 档内仍按「离底高度」（距60日低点%）降序
      原「60日日均振幅降序」被否决：与 f20 基本无关（秩相关 -0.02），最高振幅档胜率最低、先止损率 39%，
      三段时段检验中高振幅组始终垫底（详见 memory/2026-09-18 振幅分层验证）。
 
@@ -41,6 +46,8 @@ from tech_indicators.ignition import (  # noqa: E402
     IGNITION_STOP_PCT,
     IGNITION_OFF_BOTTOM_PCT,
     IGNITION_RSI_PERIOD,
+    OFF_LOW_BAND_LABELS,
+    off_low_band,
     golden_channel_state,
     ignition_candle_filter,
     ignition_cross_signal,
@@ -217,14 +224,16 @@ def main() -> int:
     hits = pd.DataFrame(rows).drop_duplicates("ts_code")
     hit_tiers = hits.apply(lambda r: tier(r, args.deep, args.slope), axis=1)
     hits["tier"], hits["tier_n"] = hit_tiers.str[1], hit_tiers.map(lambda x: ORDER[x[1]])
-    hits = hits.sort_values(["tier_n", "vol_confirm", "off_low"], ascending=[True, False, False])
+    hits["band_rank"], hits["off_band"] = zip(*hits.off_low.map(off_low_band))
+    hits = hits.sort_values(["tier_n", "vol_confirm", "band_rank", "off_low"],
+                            ascending=[True, False, True, False])
     shown = hits if args.all else hits[hits.tier == "超跌起爆"]
     if args.csv:
         hits.rename(columns=dict(
             ts_code="代码", name="名称", industry="行业", tier="位置档位", signal_date="信号日",
             close="收盘价", pct_chg="当日涨幅%", rsi=f"RSI{IGNITION_RSI_PERIOD}",
             position_ok="位置达标", candle_ok="形态干净", dd60="距60日高点%",
-            off_low="距60日低点%", amp60="60日日均振幅%", vol_x="量/昨量",
+            off_low="距60日低点%", off_band="离底档位", amp60="60日日均振幅%", vol_x="量/昨量",
             to_upper="距金牛上沿%", bear="熊市通道中", stop="止损价", stop_pct="距止损%",
             cross="当日上穿", first_cross="首次上穿",
             liangtuo_ok="量托确认", obv_ok="OBV金叉确认", vol_confirm="量能确认")).to_csv(args.csv, index=False, encoding="utf-8-sig")
@@ -234,18 +243,25 @@ def main() -> int:
           f"有行情且指标可用：{done} 只扫完")
     dist = "、".join(f"{k} {(hits.tier==k).sum()}" for k in ORDER)
     print(f"命中起爆点上穿 {len(hits)} 只 → {dist}")
+    ig = hits[hits.tier == "超跌起爆"]
+    if len(ig):
+        band_dist = "、".join(f"{lab} {int((ig.off_band == lab).sum())}"
+                              for lab in OFF_LOW_BAND_LABELS if int((ig.off_band == lab).sum()) > 0)
+        print(f"超跌起爆离底分档：{band_dist}")
     print(f"（超跌起爆 = 60日内跌过{args.deep:.0f}% + 已离底≥{IGNITION_OFF_BOTTOM_PCT:.0f}% + "
           f"弹回不超跌幅×{args.slope}，历史 20 日期望 +4.9%、胜率 64%；"
-          f"档内排序 2026-09-18 定稿：量能确认优先 → 离底高度降序，振幅仅展示不作排序键。"
+          f"档内排序 2026-10-08 定稿：量能确认优先 → 离底分档（②10~20% ≈ ③20~35% 已确认启动 > "
+          f"①5~10% 刚触底 > ④>35% 沉底警示，档内再按离底高度降序），振幅仅展示不作排序键；"
+          f"离底档位只用于排序与标注、不作买入过滤（其优势只在大盘 MA60 下方成立）。"
           f"注：MA20/MA60 同向向下的趋势闸门经 24379 笔前向收益复验为反向过滤，不设）\n")
     cols = shown.head(args.limit).rename(columns=dict(
         ts_code="代码", name="名称", industry="行业", tier="档", close="收盘价", dd60="距60高%",
-        off_low="距60低%", amp60="振幅%", vol_x="量/昨", to_upper="距上沿%", rsi="RSI6",
+        off_low="距60低%", off_band="离底档", amp60="振幅%", vol_x="量/昨", to_upper="距上沿%", rsi="RSI6",
         stop="止损价", stop_pct="距止损%", pct_chg="涨幅%", signal_date="信号日",
         position_ok="位置", candle_ok="形态", bear="熊道",
         liangtuo_ok="量托", obv_ok="OBV", vol_confirm="量能确认"))
     cols = cols[["代码", "名称", "行业", "档", "收盘价", "止损价", "距止损%", "涨幅%", "RSI6",
-                 "距60高%", "距60低%", "振幅%", "量/昨", "距上沿%", "形态", "熊道",
+                 "距60高%", "距60低%", "离底档", "振幅%", "量/昨", "距上沿%", "形态", "熊道",
                  "量托", "OBV", "量能确认"]]
     pd.set_option("display.unicode.east_asian_width", True)
     with pd.option_context("display.max_columns", None, "display.width", 220):

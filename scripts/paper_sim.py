@@ -33,7 +33,9 @@ sys.path.insert(0, str(ROOT))
 
 from tech_indicators.ignition import (  # noqa: E402
     IgnitionPosition,
+    OFF_LOW_BAND_LABELS,
     golden_channel_state,
+    off_low_band,
 )
 
 DB = ROOT / "data" / "stock.db"
@@ -60,7 +62,8 @@ PULLBACK_COLS = {
 IGNITION_COLS = {
     "代码": "ts_code", "名称": "name", "行业": "category", "位置档位": "tier",
     "信号日": "signal_date", "收盘价": "close_raw", "当日涨幅%": "pct_chg",
-    "距60日高点%": "dd60", "距金牛上沿%": "to_upper", "60日日均振幅%": "amp60",
+    "距60日高点%": "dd60", "距60日低点%": "off_low",
+    "距金牛上沿%": "to_upper", "60日日均振幅%": "amp60",
     "量托确认": "liangtuo_ok", "OBV金叉确认": "obv_ok", "量能确认": "vol_confirm",
 }
 
@@ -80,6 +83,7 @@ CREATE TABLE IF NOT EXISTS signal_pool (
     liangtuo_ok INTEGER DEFAULT 0,
     obv_ok INTEGER DEFAULT 0,
     dd60 REAL,                          -- 距60日高点%（负值）
+    off_low REAL,                       -- 距60日低点%（超跌档；唯一分档口径 tech_indicators.ignition.off_low_band）
     to_upper REAL,                      -- 距上沿%
     amp60 REAL,                         -- 60日日均振幅%（超跌）
     size_plan REAL,                     -- 计划买入金额
@@ -219,6 +223,7 @@ def ingest(csv_path: str, strategy: str, con: sqlite3.Connection) -> int:
             "liangtuo_ok": int(r["liangtuo_ok"] in ("True", "true", "1", "✓")),
             "obv_ok": int(r["obv_ok"] in ("True", "true", "1", "✓")),
             "dd60": float(r["dd60"]) if r.get("dd60") not in (None, "", "nan") else None,
+            "off_low": float(r["off_low"]) if r.get("off_low") not in (None, "", "nan") else None,
             "to_upper": float(r["to_upper"]) if r.get("to_upper") not in (None, "", "nan") else None,
             "amp60": float(r["amp60"]) if r.get("amp60") not in (None, "", "nan") else None,
         }
@@ -226,11 +231,11 @@ def ingest(csv_path: str, strategy: str, con: sqlite3.Connection) -> int:
         cur = con.execute(
             "INSERT OR IGNORE INTO signal_pool (signal_date, strategy, ts_code, name, category, "
             "close_raw, pct_chg, stop_raw, heavy, vol_confirm, liangtuo_ok, obv_ok, dd60, "
-            "to_upper, amp60, size_plan) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "off_low, to_upper, amp60, size_plan) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (rec["signal_date"], rec["strategy"], rec["ts_code"], rec["name"], rec["category"],
              rec["close_raw"], rec["pct_chg"], rec["stop_raw"], rec["heavy"], rec["vol_confirm"],
-             rec["liangtuo_ok"], rec["obv_ok"], rec["dd60"], rec["to_upper"], rec["amp60"],
-             rec["size_plan"]),
+             rec["liangtuo_ok"], rec["obv_ok"], rec["dd60"], rec["off_low"], rec["to_upper"],
+             rec["amp60"], rec["size_plan"]),
         )
         n += cur.rowcount
     con.commit()
@@ -377,6 +382,12 @@ def step(date: str) -> None:
     con.close()
 
 
+def band_dist_note(off_lows) -> str:
+    """一组离底值 → 「①刚触底 8、③已确认启动 3」样式（无值返回空串）。档位口径见 tech_indicators.ignition。"""
+    labels = [off_low_band(v)[1] for v in off_lows if v is not None]
+    return "、".join(f"{lab} {labels.count(lab)}" for lab in OFF_LOW_BAND_LABELS if labels.count(lab))
+
+
 def fmt_pct(x: float | None, signed: bool = True) -> str:
     if x is None or not np.isfinite(x):
         return "-"
@@ -399,11 +410,15 @@ def report(date: str) -> str:
         return dict(zip(cols, row))
 
     # 今日新信号
-    sigs = con.execute("SELECT * FROM signal_pool WHERE signal_date=?", (date,)).fetchall()
+    sigs = [sig_dict(r) for r in con.execute("SELECT * FROM signal_pool WHERE signal_date=?", (date,))]
     if sigs:
-        n_pb = sum(1 for s in sigs if s[2] == "pullback")
-        n_ig = sum(1 for s in sigs if s[2] == "ignition")
-        out.append(f"\n【今日新信号】回踩 {n_pb} 笔 / 超跌 {n_ig} 笔")
+        n_pb = sum(1 for s in sigs if s["strategy"] == "pullback")
+        ig_sigs = [s for s in sigs if s["strategy"] == "ignition"]
+        line = f"\n【今日新信号】回踩 {n_pb} 笔 / 超跌 {len(ig_sigs)} 笔"
+        note = band_dist_note([s["off_low"] for s in ig_sigs])
+        if note:
+            line += f"（离底分档：{note}）"
+        out.append(line)
     else:
         out.append("\n【今日新信号】无")
 
@@ -427,8 +442,10 @@ def report(date: str) -> str:
                     tag = "量能确认"
                 else:
                     tag = "普通"
+            extra = (f"｜离底 {s['off_low']:.1f}% {off_low_band(s['off_low'])[1]}"
+                     if s["off_low"] is not None else "")
             out.append(f"● {s['name']} {s['ts_code']} [{strat}] 买 {s['entry_price_raw']:.2f} 元 "
-                       f"× {s['size_plan']/10000:.0f} 万（{tag}）")
+                       f"× {s['size_plan']/10000:.0f} 万（{tag}）{extra}")
     else:
         out.append("\n【今日建仓】无")
 
@@ -479,9 +496,11 @@ def report(date: str) -> str:
             ret = px_adj / s["entry_price_adj"] - 1.0
             stop_raw = s["stop_line_adj"] / float(bars["adj_factor"].iloc[-1]) if s["stop_line_adj"] else None
             stop_pct = (px_adj / s["stop_line_adj"] - 1.0) * 100 if s["stop_line_adj"] else None
+            extra = (f"｜离底 {s['off_low']:.1f}% {off_low_band(s['off_low'])[1]}"
+                     if s["off_low"] is not None else "")
             out.append(f"● {s['name']} {s['ts_code']} [{strat}] {s['entry_date'][4:6]}/{s['entry_date'][6:8]}买 "
                        f"成本 {s['entry_price_raw']:.2f} 现价 {px_raw:.2f} 浮盈 {fmt_pct(ret*100)} "
-                       f"止损 {stop_raw:.2f}（距 {fmt_pct(stop_pct)}）")
+                       f"止损 {stop_raw:.2f}（距 {fmt_pct(stop_pct)}）{extra}")
     else:
         out.append("\n【当前持仓】无")
 
