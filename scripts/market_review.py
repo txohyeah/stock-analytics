@@ -2,7 +2,7 @@
 """大盘复盘日报 —— 只报状态，不给建议（2026-10-08，B2）。
 
 数据源：`market_state_daily`（脚本 `market_state.py` 维护）+ 当日 `daily` 涨跌家数。
-输出四件：① 等权指数 vs MA60 ② 20 日宽度 ③ 当日涨跌家数/中位涨幅 ④ 一句定性。
+输出四件：① 等权指数 vs MA60 ② 20 日宽度 ③ 当日涨跌家数/中位涨幅 ④ 定性（当日 + 中期两段，2026-10-08 定稿）。
 
 **纪律（弱耦合，勿破）**：
   - 只给状态判断，**不给买卖建议**、**不当过滤器**（不参与任何信号筛选）；
@@ -75,14 +75,36 @@ def fmt_review(con: sqlite3.Connection, date: str) -> str:
     out.append(f"②宽度：20 日上涨家数占比 {b_now:.1f}%{b_prev} → {cur['mkt_breadth']}（阈 50%）")
     out.append(f"③当日：涨 {c['up']} / 跌 {c['down']} / 平 {c['flat']}（共 {c['n']} 只，剔无行情）；"
                f"中位涨幅 {c['median']:+.2f}%；跌超 5% {c['down5']} 家")
-    out.append(f"④定性：{STATE_ZH.get(cur['mkt_state'], '状态样本不足')}")
+    # ④定性（2026-10-08 定稿）：当日与中期分开说，跌得狠的日子先说当日
+    # 当日分档：等权涨跌 ±0.5% 内=平稳；超出且上涨占比 <40%=普跌、>60%=普涨；其余=分化
+    ew_ret = (cur["ret_mean"] or 0) * 100
+    up_pct = c["up"] / c["n"] * 100 if c["n"] else 0.0
+    if abs(ew_ret) <= 0.5:
+        day_tag = "平稳"
+    elif ew_ret < 0 and up_pct < 40:
+        day_tag = "普跌"
+    elif ew_ret > 0 and up_pct > 60:
+        day_tag = "普涨"
+    else:
+        day_tag = "分化"
+    slope_pct = (cur["ew_slope60"] or 0) * 100
+    slope_zh = "走平" if abs(slope_pct) <= 0.05 else ("上行" if slope_pct > 0 else "下行")
+    if cur["mkt_dir"] == "above":
+        mid_seg = (f"仍在 MA60 上方但缓冲薄（{gap:+.2f}%）" if abs(gap) < 1
+                   else f"仍在 MA60 上方（缓冲 {gap:+.2f}%）")
+    else:
+        mid_seg = f"位于 MA60 下方（{gap:+.2f}%）"
+    out.append(f"④定性：当日{day_tag}（等权 {ew_ret:+.2f}%，上涨 {up_pct:.1f}%）"
+               f"｜中期：{mid_seg}，MA60 {slope_zh}")
     st = STATE_STATS.get(cur["mkt_state"])
     if st:
-        out.append(f"　（样本内参照 2018-2026：该状态 {st[2]:,} 笔起爆，f20 均值 {st[0]:+.2f}%、"
-                   f"中位 {st[1]:+.2f}%——历史统计，不是承诺）")
+        state_short = STATE_ZH.get(cur["mkt_state"], "状态样本不足").split(" —— ")[0]
+        out.append(f"　（中期状态「{state_short}」样本内参照 2018-2026：该状态 {st[2]:,} 笔起爆，"
+                   f"f20 均值 {st[0]:+.2f}%、中位 {st[1]:+.2f}%——历史统计，不是承诺）")
     out.append("")
     out.append("口径：等权指数 = 全市场个股当日涨跌幅（截尾 ±21%）横截面均值逐日累乘（2017 起）；"
-               "方向 = 指数 vs 自身 MA60；宽度 = 20 日上涨家数占比 >50% 判宽。")
+               "方向 = 指数 vs 自身 MA60；宽度 = 20 日上涨家数占比 >50% 判宽；"
+               "当日定性 = 等权涨跌 ±0.5% 内为平稳，超出且上涨占比 <40% 为普跌、>60% 为普涨，其余为分化。")
     out.append("纪律：只报状态，不作买卖建议、不当过滤器；结论出自 2018-2026 样本内。")
     return "\n".join(out)
 
