@@ -11,10 +11,12 @@
      ① 量能确认（量托/OBV金叉，4日窗口）在前 —— 2026-09-18 定稿，8990 笔分层验证：
         有确认 f20 +8.9%/胜率65.8%，无 +4.2%/58.1%（独立回测同向）
      ② 离底分档（2026-10-08 定稿，29,810 笔三维交叉表，见 tech_indicators.ignition.off_low_band）：
-        ②10~20% ≈ ③20~35%（已确认启动） > ①5~10%（刚触底） > ④>35%（沉底警示）
+        ②10~20% ≈ ③20~35%（已确认启动） > ④>35%（沉底警示）
         —— 离底在每个跌深档内部单调递增（控住跌深仍有 +3.68/+7.43/+8.68pp 独立增量），
         但 >35% 档 8 年里只有 2 年为正、池化被 2024 一年拉正，故不再「越高越靠前」。
-        ⚠️ 该梯队优势只在大盘 MA60 下方成立 → 档位**只用于排序与标注，不当买入过滤**。
+        ⚠️ 该梯队优势只在大盘 MA60 下方成立 → ②③④ 档位仍只用于排序与标注。
+        2026-10-09 用户拍板升级：①5~10% 刚触底档整体剔除出超跌起爆档（单列「刚触底」
+        观察档，不建仓、推送不列明细）——剔除后合并 n=15,183：f20 +6.96%/胜率 64.9%。
      ③ 档内仍按「离底高度」（距60日低点%）降序
      原「60日日均振幅降序」被否决：与 f20 基本无关（秩相关 -0.02），最高振幅档胜率最低、先止损率 39%，
      三段时段检验中高振幅组始终垫底（详见 memory/2026-09-18 振幅分层验证）。
@@ -45,6 +47,7 @@ from tech_indicators.ignition import (  # noqa: E402
     IGNITION_STOP_BARS,
     IGNITION_STOP_PCT,
     IGNITION_OFF_BOTTOM_PCT,
+    IGNITION_OFF_BOTTOM_MIN_PCT,
     IGNITION_RSI_PERIOD,
     OFF_LOW_BAND_LABELS,
     off_low_band,
@@ -147,9 +150,12 @@ def scan_one(df: pd.DataFrame, name: str, industry: str) -> list[dict]:
 
 
 def tier(hit: dict, deep_pct: float, slope: float) -> tuple[int, str]:
-    """四道条件合成四档。名字即含义，不做一票否决式的隐藏过滤。
+    """五道条件合成五档。名字即含义，不做一票否决式的隐藏过滤。
 
-    超跌起爆：60日内至少跌过 deep_pct%，且已离底 ≥5%，且弹回不超过跌幅的 slope 倍
+    超跌起爆：60日内至少跌过 deep_pct%，且已离底 ≥10%（2026-10-09 拍板，原 5% 起），
+              且弹回不超过跌幅的 slope 倍 —— 剔除①档后合并 n=15,183：f20 +6.96%/胜率 64.9%
+    刚触底  ：跌幅够、已离底 ≥5% 但 <10%、未追高 —— 历史全表最弱档
+              （f20 +2.15%/胜率 53.5%/止损 31.1%，14,635 笔），2026-10-09 拍板不建仓，仅观察
     未离底  ：跌幅够但还贴着 60 日低点（下跌中继风险，历史 f20 最差）
     追高    ：已弹回超过跌幅的 slope 倍（掉100弹回80，不是抄底）
     浅回调  ：60日内根本没跌到 deep_pct%（强势票的小回调，历史 f20 期望≈0）
@@ -157,17 +163,20 @@ def tier(hit: dict, deep_pct: float, slope: float) -> tuple[int, str]:
     dd, off = hit["dd60"], hit["off_low"]
     deep = dd <= -deep_pct
     off_bottom = off >= IGNITION_OFF_BOTTOM_PCT
+    confirmed = off >= IGNITION_OFF_BOTTOM_MIN_PCT
     chased = off > slope * abs(dd)
-    if deep and off_bottom and not chased:
+    if deep and confirmed and not chased:
         return 0, "超跌起爆"
     if deep and chased:
-        return 3, "追高"
+        return 4, "追高"
+    if deep and off_bottom:
+        return 1, "刚触底"
     if not off_bottom:
-        return 2, "未离底"
-    return 1, "浅回调"
+        return 3, "未离底"
+    return 2, "浅回调"
 
 
-ORDER = {"超跌起爆": 0, "浅回调": 1, "未离底": 2, "追高": 3}
+ORDER = {"超跌起爆": 0, "刚触底": 1, "浅回调": 2, "未离底": 3, "追高": 4}
 
 
 def main() -> int:
@@ -248,11 +257,13 @@ def main() -> int:
         band_dist = "、".join(f"{lab} {int((ig.off_band == lab).sum())}"
                               for lab in OFF_LOW_BAND_LABELS if int((ig.off_band == lab).sum()) > 0)
         print(f"超跌起爆离底分档：{band_dist}")
-    print(f"（超跌起爆 = 60日内跌过{args.deep:.0f}% + 已离底≥{IGNITION_OFF_BOTTOM_PCT:.0f}% + "
-          f"弹回不超跌幅×{args.slope}，历史 20 日期望 +4.9%、胜率 64%；"
+    print(f"（超跌起爆 = 60日内跌过{args.deep:.0f}% + 已离底≥{IGNITION_OFF_BOTTOM_MIN_PCT:.0f}% + "
+          f"弹回不超跌幅×{args.slope}，历史 20 日期望 +7.0%、胜率 65%（2026-10-09 剔①档口径，n=15,183；"
+          f"剔除前全档 +4.6%/59%）；"
           f"档内排序 2026-10-08 定稿：量能确认优先 → 离底分档（②10~20% ≈ ③20~35% 已确认启动 > "
-          f"①5~10% 刚触底 > ④>35% 沉底警示，档内再按离底高度降序），振幅仅展示不作排序键；"
-          f"离底档位只用于排序与标注、不作买入过滤（其优势只在大盘 MA60 下方成立）。"
+          f"④>35% 沉底警示，档内再按离底高度降序），振幅仅展示不作排序键；"
+          f"2026-10-09 拍板：①5~10% 刚触底档单列观察、不建仓不推送（历史全表最弱 +2.15%/53.5%）；"
+          f"分档优势只在大盘 MA60 下方成立。"
           f"注：MA20/MA60 同向向下的趋势闸门经 24379 笔前向收益复验为反向过滤，不设）\n")
     cols = shown.head(args.limit).rename(columns=dict(
         ts_code="代码", name="名称", industry="行业", tier="档", close="收盘价", dd60="距60高%",
