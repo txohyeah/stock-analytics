@@ -2,7 +2,7 @@
 """起爆模拟盘：信号池记录 + 每日推进 + 报表（2026-09-10 新建）
 
 口径（与回测 backtest_ignition.py 完全一致）：
-  - 建仓：信号日收盘买入；信号日涨幅 >5% 则次日收盘买（不追）；次日停牌/无行情则放弃
+  - 建仓：一律信号日收盘买入（2026-10-12 拍板废除「>5% 次日买」旧规）；当日停牌/无行情则放弃
   - 复权：全程后复权（raw × adj_factor），基准不随最新价漂移，账本稳定；报表另显未复权价
   - 卖出：唯一实现在库 IgnitionPosition.step（C2：撞金牛上沿全清 + max(硬10%, 滚动30根) 止损）
   - 费用：买入 0.1% 佣金；卖出 0.1% 佣金 + 0.05% 印花税
@@ -146,12 +146,6 @@ def load_bars_adj(con: sqlite3.Connection, code: str, end_date: str,
     ch = golden_channel_state(rows, causal=True)
     rows["upper"] = ch["upper"].values
     return rows
-
-
-def next_trade_date(con: sqlite3.Connection, date: str) -> str | None:
-    row = con.execute("SELECT MIN(trade_date) FROM daily WHERE trade_date > ?",
-                      (date,)).fetchone()
-    return str(row[0]) if row and row[0] else None
 
 
 def merge_duplicates(con: sqlite3.Connection) -> int:
@@ -325,12 +319,7 @@ def step(date: str) -> None:
         s = dict(zip([d[0] for d in con.execute("SELECT * FROM signal_pool LIMIT 0").description], sig))
         entry_date = s["entry_date"]
         if entry_date is None:
-            if s["pct_chg"] is not None and s["pct_chg"] > 5.0:
-                entry_date = next_trade_date(scon, s["signal_date"])
-                if entry_date is None or entry_date > date:
-                    continue                      # 次日还没到，继续等
-            else:
-                entry_date = s["signal_date"]
+            entry_date = s["signal_date"]         # 一律信号日收盘建仓（2026-10-12 拍板，废除 >5% 次日买）
             con.execute("UPDATE signal_pool SET entry_date=? WHERE id=?", (entry_date, s["id"]))
         if entry_date > date:
             continue
@@ -339,7 +328,7 @@ def step(date: str) -> None:
                         "WHERE id=?", (s["id"],))
             continue
         if not try_open(con, scon, s, entry_date):
-            con.execute("UPDATE signal_pool SET status='skipped', skip_reason='次日停牌/无行情' "
+            con.execute("UPDATE signal_pool SET status='skipped', skip_reason='建仓日停牌/无行情' "
                         "WHERE id=?", (s["id"],))
         else:
             held.add(s["ts_code"])
@@ -449,7 +438,7 @@ def report(date: str) -> str:
     else:
         out.append("\n【今日建仓】无")
 
-    # 待次日/合并说明
+    # 待建仓/合并说明
     pend = con.execute("SELECT COUNT(*) FROM signal_pool WHERE signal_date=? AND status='pending'",
                        (date,)).fetchone()[0]
     merged = con.execute("SELECT COUNT(*) FROM signal_pool WHERE signal_date=? AND "
@@ -459,7 +448,7 @@ def report(date: str) -> str:
                             (date,)).fetchone()[0]
     notes = []
     if pend:
-        notes.append(f"{pend} 笔涨幅>5% 待次日建仓")
+        notes.append(f"{pend} 笔待建仓")   # 新规下 step 后正常应为 0，非 0 需人工检查
     if merged:
         notes.append(f"{merged} 笔同票多策略合并（取最高档）")
     if held_skip:

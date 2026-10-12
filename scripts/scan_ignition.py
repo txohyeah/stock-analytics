@@ -277,7 +277,7 @@ def main() -> int:
     pd.set_option("display.unicode.east_asian_width", True)
     with pd.option_context("display.max_columns", None, "display.width", 220):
         print(cols.to_string(index=False))
-    print("\n口径（2026-09-05 因果版定稿）：买入价=信号日收盘（当日涨幅>5% 则次日再买，不追）；"
+    print("\n口径（2026-10-12 修订）：买入价=信号日收盘（一律当日建仓，已废除「>5% 次日买」）；"
           "「止损价」= max(买价×0.90, 最近30根最低价) 收盘触发、逐日滚动；"
           "盘中摸到金牛上沿但收盘收回下方（阴线或长上影）→ 全清（2026-09-05 实测优于减半）；"
           "移动止盈默认关闭（组合层实测关闭更优）；熊道仅作参考，不再触发清仓。「距上沿%」是到清仓价的空间。"

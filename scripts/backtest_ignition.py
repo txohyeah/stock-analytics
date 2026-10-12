@@ -228,7 +228,7 @@ def simulate_single(df: pd.DataFrame, sig_col: str, capital: float = 1_000_000.0
     """
     a = bar_arrays(df, sig_col)
     n = len(df)
-    cash, pos, pending, trades = capital, None, None, []
+    cash, pos, trades = capital, None, []
     curve = np.full(n, np.nan)
     for i in range(n):
         if pos is not None:
@@ -250,19 +250,9 @@ def simulate_single(df: pd.DataFrame, sig_col: str, capital: float = 1_000_000.0
                                    ret=pos["last"] / pos["entry"] - 1,
                                    pnl=cut * (pos["last"] - pos["entry"]),
                                    days=i - pos["i0"], reason=reason))
-        if pending is not None and i >= pending and pos is None:     # 挂单成交
-            price = a["close"][i]
-            if np.isfinite(price) and price > 0:
-                pos = new_position(a, i, cash)
-                cash = 0.0
-            pending = None
-
-        if pos is None and pending is None and a[sig_col][i] and i < n - 1:
-            if a["pct_chg"][i] > 5:                                   # 起爆日涨>5% 不追，次日买
-                pending = i + 1
-            else:
-                pos = new_position(a, i, cash)
-                cash = 0.0
+        if pos is None and a[sig_col][i] and i < n - 1:
+            pos = new_position(a, i, cash)      # 一律信号日收盘建仓（2026-10-12 拍板，废除 >5% 次日买）
+            cash = 0.0
 
         curve[i] = cash + (pos["shares"] * pos["last"] if pos else 0.0)
     if pos is not None:                                      # 期末（含退市）平仓
@@ -298,7 +288,6 @@ def simulate(bars: dict[str, pd.DataFrame], year: int, sig_col: str, frac: float
 
     cash = 1_000_000.0
     held: dict[str, dict] = {}
-    pending: list[tuple[str, int]] = []
     trades: list[dict] = []
     curve = []
 
@@ -315,15 +304,6 @@ def simulate(bars: dict[str, pd.DataFrame], year: int, sig_col: str, frac: float
                 return
             cash -= alloc
             held[code] = new_position(a, i, alloc)
-
-        for code, when in list(pending):
-            if day < when:
-                continue
-            pending.remove((code, when))
-            i = look[code].get(day)
-            if code in held or len(held) >= slot or i is None:
-                continue
-            open_position(code, i)
 
         for code in list(held):
             a = arr[code]
@@ -356,11 +336,7 @@ def simulate(bars: dict[str, pd.DataFrame], year: int, sig_col: str, frac: float
                 continue
             if not a[sig_col][i]:
                 continue
-            if a["pct_chg"][i] > 5:
-                if t_idx + 1 < len(dates):
-                    pending.append((code, dates[t_idx + 1]))
-            else:
-                open_position(code, i)
+            open_position(code, i)      # 一律信号日收盘建仓（2026-10-12 拍板，废除 >5% 次日买）
 
         curve.append(cash + equity())
 
