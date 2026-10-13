@@ -25,7 +25,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
 CF_D1 = Path("/root/.qwenpaw/workspaces/default/projects/stocks-site/scripts/cf_d1.py")
-SQL = "SELECT code, name, category, subtype FROM stocks ORDER BY code"
+SQL = "SELECT code, name, category, subtype, added_at FROM stocks ORDER BY code"
 TXT_PATH = DATA / "watchlist_site.txt"
 CSV_PATH = DATA / "watchlist_site.csv"
 
@@ -44,9 +44,24 @@ def fetch_from_site() -> list[dict]:
     return rows
 
 
+def today_added(rows: list[dict], today: str) -> list[dict]:
+    """当日新增（added_at 日期 = 今天），按收录时间升序。收录流程入池的票
+    不会出现在"与上次相比新增"里（本地文件当时已同步），此口径补盲区。"""
+    out = []
+    for r in rows:
+        ts = (r.get("added_at") or "")[:19]
+        if ts[:10] == today:
+            out.append({"code": r["code"], "name": r.get("name") or "",
+                        "hhmm": ts[11:16] if len(ts) >= 16 else "?"})
+    out.sort(key=lambda x: x["hhmm"])
+    return out
+
+
 def main() -> int:
     rows = fetch_from_site()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    now = datetime.now()
+    now_str = now.strftime("%Y-%m-%d %H:%M")
+    today = now.strftime("%Y-%m-%d")
     first_sync = not TXT_PATH.exists()
 
     old = set(TXT_PATH.read_text().split()) if TXT_PATH.exists() else set()
@@ -56,16 +71,16 @@ def main() -> int:
     TXT_PATH.write_text("\n".join(new_codes) + "\n")
     with open(CSV_PATH, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
-        w.writerow(["code", "name", "category", "subtype", "synced_at"])
+        w.writerow(["code", "name", "category", "subtype", "added_at", "synced_at"])
         for r in rows:
             w.writerow([r["code"], r["name"], r.get("category", ""),
-                        r.get("subtype") or "", now])
+                        r.get("subtype") or "", (r.get("added_at") or "")[:19], now_str])
 
     stat: dict[str, int] = {}
     for r in rows:
         stat[r.get("category") or "?"] = stat.get(r.get("category") or "?", 0) + 1
 
-    print(f"同步完成 {now}｜关注池 {len(rows)} 只："
+    print(f"同步完成 {now_str}｜关注池 {len(rows)} 只："
           + "、".join(f"{k} {v}" for k, v in sorted(stat.items())))
     if first_sync:
         print("首次同步，建立本地基准（无历史可比）。")
@@ -78,6 +93,11 @@ def main() -> int:
         print(f"移除 {len(removed)} 只：{', '.join(removed)}")
     if not added and not removed:
         print("与上次相比无变化。")
+    # 当日新增（读站点 added_at，与"与上次相比"口径独立；次日扫描自动覆盖新票）
+    ta = today_added(rows, today)
+    if ta:
+        detail = "、".join(f"{x['name']} {x['code']}（{x['hhmm']} 收录）" for x in ta)
+        print(f"今日新增 {len(ta)} 只：{detail}")
     return 0
 
 
