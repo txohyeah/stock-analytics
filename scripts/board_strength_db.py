@@ -19,6 +19,7 @@ import json
 import re
 import sqlite3
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -56,6 +57,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS board_strength(
         date TEXT NOT NULL, name TEXT NOT NULL, value INTEGER NOT NULL,
         zt_count INTEGER, rank INTEGER, code TEXT, scope TEXT NOT NULL,
+        source TEXT,
         PRIMARY KEY(date, name));
     CREATE INDEX IF NOT EXISTS idx_bs_name ON board_strength(name);
     CREATE INDEX IF NOT EXISTS idx_bs_date ON board_strength(date);
@@ -63,6 +65,12 @@ def init_db():
     CREATE TABLE IF NOT EXISTS capture_log(
         ts TEXT, action TEXT, days INTEGER, rows INTEGER, note TEXT);
     ''')
+    # 老库迁移：source 列标识数据来源（rotat/live/direct）
+    cols = {r[1] for r in con.execute('PRAGMA table_info(board_strength)').fetchall()}
+    if 'source' not in cols:
+        con.execute('ALTER TABLE board_strength ADD COLUMN source TEXT')
+        con.execute("UPDATE board_strength SET source='rotat' WHERE scope='rotat' AND source IS NULL")
+        con.execute("UPDATE board_strength SET source='live'  WHERE scope='live'  AND source IS NULL")
     con.commit()
     return con
 
@@ -119,6 +127,89 @@ def fetch_live(timeout=25):
     return out
 
 
+# ---------- L2 备份通道：直连开盘啦（与短线侠同源同值） ----------
+# 实测 2026-10-22：240 个板块全量对账，强度值 238/240 完全一致（99.2%），
+# rank 差异全部由「振兴东北」一个异常值引起的连续位移。
+# 只在 L1（短线侠）失败时触发；单板块一次请求，240 个约 80 秒。
+# 返回 List 语义：[0]当日全市场排名 [1]强度 [2]成交额 [3]主力净额
+#                [4]涨跌幅% [5]疑连板家数(未确证) [6][7]未确证(不采用)
+KQJ = 'https://apphis.longhuvip.com/w1/api/index.php'
+KQJ_HEAD = {
+    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+    'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 9; SHARK PRS-A0 Build/PQ3A.190605.01141736)',
+    'Host': 'apphis.longhuvip.com',
+    'Connection': 'Keep-Alive',
+    'Accept-Encoding': 'gzip',
+}
+
+
+def _kaipan_direct(code, date, timeout=20):
+    """单板块直连取 (rank, strength)；失败抛异常。证书正常，不关校验。"""
+    d = {'PhoneOSNew': '1', 'DeviceID': str(uuid.uuid4()), 'VerSion': '5.21.0.2',
+         'apiv': 'w42', 'Date': date,
+         'a': 'GetPlate_Info_QJ', 'c': 'ZhiShuRanking', 'PlateID': code}
+    r = requests.post(KQJ, params={'apiv': 'w42', 'PhoneOSNew': '1', 'VerSion': '5.21.0.2'},
+                      data=d, headers=KQJ_HEAD, timeout=timeout)
+    r.raise_for_status()
+    j = r.json()
+    lst = j.get('List') or []
+    if str(j.get('errcode')) == '1020':
+        raise RuntimeError('NO_DATA(1020) 该日强度尚未生成')
+    if str(j.get('errcode')) != '0' or len(lst) < 2:
+        raise RuntimeError(f'errcode={j.get("errcode")} len={len(lst)}')
+    return int(lst[0]), int(lst[1])
+
+
+def direct_snapshot(date=None):
+    """L2：按最近一次 live 快照的板块清单逐板块直连，串行 0.3s，连续 5 败即止。"""
+    con = init_db()
+    date = date or latest_trade_date()
+    last = con.execute("SELECT max(date) FROM board_strength WHERE scope='live'").fetchone()[0]
+    codes = con.execute('SELECT code,name FROM board_strength '
+                        'WHERE date=? AND scope="live" ORDER BY rank', (last,)).fetchall()
+    if not codes:
+        raise RuntimeError('库里没有 live 快照，拿不到板块清单，L2 无法启动')
+    # 探针：1020 = 该日强度尚未生成（16:00 常见），直接放弃，等 20:30 复核
+    try:
+        _kaipan_direct(codes[0][0], date)
+    except Exception as e:                          # noqa: BLE001
+        if 'NO_DATA' in str(e):
+            print(f'[L2] 开盘啦 {date} 尚未生成强度数据（1020），本次跳过，等下一次复核')
+            con.execute('INSERT INTO capture_log VALUES(?,?,?,?,?)',
+                        (datetime.now().isoformat(timespec='seconds'), 'direct', 1, 0,
+                         f'date={date};nodata1020'))
+            con.commit()
+            con.close()
+            return []
+    rows, fails, streak = [], [], 0
+    for code, nm in codes:
+        try:
+            rk, val = _kaipan_direct(code, date)
+            rows.append((date, nm, val, None, rk, code, 'live', 'direct'))
+            streak = 0
+        except Exception as e:                      # noqa: BLE001
+            fails.append(f'{nm}:{str(e)[:40]}')
+            streak += 1
+            if streak >= 5:
+                print(f'[L2] 连续 {streak} 次失败，中止以防风控')
+                break
+        time.sleep(0.3)
+    if not rows:
+        raise RuntimeError('L2 直连全部失败：' + '; '.join(fails[:3]))
+    con.executemany(
+        'INSERT INTO board_strength(date,name,value,zt_count,rank,code,scope,source) '
+        'VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(date,name) DO UPDATE SET '
+        'value=excluded.value, rank=excluded.rank, code=excluded.code, source=excluded.source',
+        rows)
+    con.execute('INSERT INTO capture_log VALUES(?,?,?,?,?)',
+                (datetime.now().isoformat(timespec='seconds'), 'direct', 1, len(rows),
+                 f'date={date};basis={last};fails={len(fails)}'))
+    con.commit()
+    print(f'[L2] 直连开盘啦入库: {date} 共 {len(rows)} 个板块（清单取自 {last}），失败 {len(fails)} 个')
+    con.close()
+    return rows
+
+
 def latest_trade_date():
     """只依赖 trade_cal（日历是静态的），不依赖 20:10 才同步的 daily 表；
     收盘后(>=15:05)当日即算交易日，否则回退到上一个交易日。"""
@@ -142,9 +233,9 @@ def backfill(user_days=400):
     con = init_db()
     recs = fetch_rotat(days=user_days)
     con.executemany(
-        'INSERT INTO board_strength(date,name,value,zt_count,rank,code,scope) '
-        'VALUES(?,?,?,NULL,?,NULL,?) ON CONFLICT(date,name) DO UPDATE SET '
-        'value=excluded.value, rank=excluded.rank',
+        'INSERT INTO board_strength(date,name,value,zt_count,rank,code,scope,source) '
+        'VALUES(?,?,?,NULL,?,NULL,?,"rotat") ON CONFLICT(date,name) DO UPDATE SET '
+        'value=excluded.value, rank=excluded.rank, source=excluded.source',
         [(d, nm, v, rk, 'rotat') for d, nm, v, rk, _ in recs])
     days = len(set(r[0] for r in recs))
     con.execute('INSERT INTO capture_log VALUES(?,?,?,?,?)',
@@ -159,7 +250,14 @@ def backfill(user_days=400):
 def snapshot():
     con = init_db()
     date = latest_trade_date()
-    live = fetch_live()
+    try:
+        live = fetch_live()
+        if len(live) < 100:
+            raise RuntimeError(f'live 只返回 {len(live)} 个板块，疑似接口异常')
+    except Exception as e:                          # noqa: BLE001
+        con.close()
+        print(f'[L1] 短线侠 live 接口失败：{e} → 切 L2 直连开盘啦')
+        return direct_snapshot(date)
     # 与当日 rotat 行按数值对齐名称（机器人 ↔ 机器人概念）
     rot = con.execute('SELECT name,value FROM board_strength WHERE date=? AND scope="rotat"', (date,)).fetchall()
     alias = {}
@@ -179,10 +277,10 @@ def snapshot():
         rows.append((date, known.get(nm, nm), val, zt, i, code, 'live'))
     changed = [(r[1], prev[r[1]], r[2]) for r in rows if r[1] in prev and prev[r[1]] != r[2]]
     con.executemany(
-        'INSERT INTO board_strength(date,name,value,zt_count,rank,code,scope) '
-        'VALUES(?,?,?,?,?,?,?) ON CONFLICT(date,name) DO UPDATE SET '
+        'INSERT INTO board_strength(date,name,value,zt_count,rank,code,scope,source) '
+        'VALUES(?,?,?,?,?,?,?,"live") ON CONFLICT(date,name) DO UPDATE SET '
         'value=excluded.value, zt_count=excluded.zt_count, rank=excluded.rank, '
-        'code=excluded.code, scope=excluded.scope', rows)
+        'code=excluded.code, scope=excluded.scope, source=excluded.source', rows)
     delta_note = ''
     if changed:
         big = max(changed, key=lambda x: abs(x[2] - x[1]))
@@ -236,11 +334,15 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--backfill', type=int, nargs='?', const=400)
     ap.add_argument('--snapshot', action='store_true')
+    ap.add_argument('--direct', action='store_true', help='只走 L2 直连开盘啦（备份通道，强制触发便于演练）')
     ap.add_argument('--peek', action='store_true', help='只读实时前十 + 市场宽度，不写库')
     ap.add_argument('--report', action='store_true')
+    ap.add_argument('--date', help='指定交易日（L2 演练/补跑用，格式 YYYY-MM-DD）')
     a = ap.parse_args()
     if a.backfill:
         backfill(a.backfill)
+    if a.direct:
+        direct_snapshot(a.date)
     if a.snapshot:
         snapshot()
     if a.peek:
