@@ -20,6 +20,7 @@ import re
 import sqlite3
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -160,8 +161,8 @@ def _kaipan_direct(code, date, timeout=20):
     return int(lst[0]), int(lst[1])
 
 
-def direct_snapshot(date=None):
-    """L2：按最近一次 live 快照的板块清单逐板块直连，串行 0.3s，连续 5 败即止。"""
+def direct_snapshot(date=None, workers=4):
+    """L2：按最近一次 live 快照的板块清单逐板块直连（小并发，默认 4 路）。"""
     con = init_db()
     date = date or latest_trade_date()
     last = con.execute("SELECT max(date) FROM board_strength WHERE scope='live'").fetchone()[0]
@@ -181,21 +182,26 @@ def direct_snapshot(date=None):
             con.commit()
             con.close()
             return []
-    rows, fails, streak = [], [], 0
-    for code, nm in codes:
+
+    def fetch(item):
+        code, nm = item
         try:
             rk, val = _kaipan_direct(code, date)
-            rows.append((date, nm, val, None, rk, code, 'live', 'direct'))
-            streak = 0
+            return (date, nm, val, None, rk, code, 'live', 'direct'), None
         except Exception as e:                      # noqa: BLE001
-            fails.append(f'{nm}:{str(e)[:40]}')
-            streak += 1
-            if streak >= 5:
-                print(f'[L2] 连续 {streak} 次失败，中止以防风控')
-                break
-        time.sleep(0.3)
-    if not rows:
-        raise RuntimeError('L2 直连全部失败：' + '; '.join(fails[:3]))
+            return None, f'{nm}:{str(e)[:40]}'
+
+    rows, fails = [], []
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for row, err in ex.map(fetch, codes):
+            if row:
+                rows.append(row)
+            else:
+                fails.append(err)
+
+    if len(rows) < len(codes) * 0.9:
+        raise RuntimeError(f'L2 只成功 {len(rows)}/{len(codes)}，低于 90% 不写库：'
+                           + '; '.join(fails[:3]))
     con.executemany(
         'INSERT INTO board_strength(date,name,value,zt_count,rank,code,scope,source) '
         'VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(date,name) DO UPDATE SET '
@@ -203,9 +209,12 @@ def direct_snapshot(date=None):
         rows)
     con.execute('INSERT INTO capture_log VALUES(?,?,?,?,?)',
                 (datetime.now().isoformat(timespec='seconds'), 'direct', 1, len(rows),
-                 f'date={date};basis={last};fails={len(fails)}'))
+                 f'date={date};basis={last};fails={len(fails)};workers={workers}'))
     con.commit()
-    print(f'[L2] 直连开盘啦入库: {date} 共 {len(rows)} 个板块（清单取自 {last}），失败 {len(fails)} 个')
+    print(f'[L2] 直连开盘啦入库: {date} 共 {len(rows)}/{len(codes)} 个板块'
+          f'（清单取自 {last}），失败 {len(fails)} 个')
+    for f in fails[:5]:
+        print('    失败:', f)
     con.close()
     return rows
 
@@ -338,11 +347,12 @@ def main():
     ap.add_argument('--peek', action='store_true', help='只读实时前十 + 市场宽度，不写库')
     ap.add_argument('--report', action='store_true')
     ap.add_argument('--date', help='指定交易日（L2 演练/补跑用，格式 YYYY-MM-DD）')
+    ap.add_argument('--workers', type=int, default=4, help='L2 并发数（默认 4）')
     a = ap.parse_args()
     if a.backfill:
         backfill(a.backfill)
     if a.direct:
-        direct_snapshot(a.date)
+        direct_snapshot(a.date, a.workers)
     if a.snapshot:
         snapshot()
     if a.peek:
