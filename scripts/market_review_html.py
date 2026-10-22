@@ -40,6 +40,7 @@ from scripts.market_review import (  # noqa: E402
     day_counts, index_section, kline_section, limit_counts, sector_section,
 )
 from scripts.market_state import connect, update  # noqa: E402
+from scripts.market_lines import lines_section  # noqa: E402
 
 OUT_DIR = ROOT / "reports"
 
@@ -53,6 +54,11 @@ FOOTER_CALIBER = (
     "涨停/跌停 = 近似口径（主板 10%、创业科创 20%、北交 30%、主板 ST 5%，收盘触板判定，新股上市初期有误差）；"
     "指数 = tushare 指数日线，两市成交额 = 上证指数+深证综指成交额合计，两融 = 沪深融资融券余额（T-1 披露）；"
     f"板块 = tushare 行业分类（≥{SECTOR_MIN_N} 家），数值 = 行业内个股当日涨跌幅中位数。")
+# 画线台账口径（2026-10-22 增，与 fmt_review 同步）
+FOOTER_LINES = ("画线台账 = 用户手绘线（登记日 point-in-time 存档），失效 = 收盘穿越（压力站上/支撑跌破），"
+                "盘中触碰不算，只提醒不催改；结构锚 = Brooks MTR swing（LH+LL→空头偏/HH+HL→多头偏/混合中性，"
+                "左右1根确认、回看40根，复用 pa_engine 原实现）；MACD = 12/26/9 标准 EMA 递推，"
+                "数值与通达信可能有零点几的初始化差异，定性一致。")
 FOOTER_DISCIPLINE = "纪律：只报状态，不作买卖建议、不当过滤器；结论出自 2018-2026 样本内。"
 
 CSS = """
@@ -155,6 +161,7 @@ def collect(con: sqlite3.Connection, date: str) -> dict:
         "date": td, "d": d, "wk": "一二三四五六日"[pd.Timestamp(d).weekday()],
         "counts": c, "lc": lc, "kl_lines": kl_lines, "kl_summary": kl_summary,
         "sec_lines": sec_lines, "idx_lines": idx_lines,
+        "lines_rows": lines_section(con, td),
         "ew_idx": cur["ew_idx"], "ew_ma60": cur["ew_ma60"], "dir_zh": dir_zh, "gap": gap,
         "slope_pct": slope_pct, "slope_zh": slope_zh, "b_now": b_now, "b_prev_txt": b_prev_txt,
         "ew_ret": ew_ret, "up_pct": up_pct, "day_tag": day_tag, "amp_note": amp_note,
@@ -298,8 +305,35 @@ def render(v: dict) -> str:
         f"MA60 {H.escape(v['slope_zh'])}</div>{state_note}</div>")
     parts.append("</section>")
 
+    # —— ⑧画线台账 + ⑨结构参考（2026-10-22 增，market_lines）——
+    cur_title, blocks = None, []
+    for r in v["lines_rows"]:
+        if r.startswith("⑧") or r.startswith("⑨"):
+            if cur_title:
+                blocks.append((cur_title, cur_body))
+            cur_title, cur_body = r, []
+        else:
+            cur_body.append(r)
+    if cur_title:
+        blocks.append((cur_title, cur_body))
+    if blocks:
+        parts.append("<section><h2>画线台账</h2>")
+        for title, body in blocks:
+            body_html = ""
+            for row in body:
+                txt = H.escape(row.strip())
+                if row.strip().startswith("⚠️"):
+                    body_html += f"<div class='b'><b style='color:var(--up)'>{txt}</b></div>"
+                elif row.strip().startswith("✅"):
+                    body_html += f"<div class='b'><b style='color:var(--dn)'>{txt}</b></div>"
+                else:
+                    body_html += f"<div class='b'>{txt}</div>"
+            parts.append(f"<div class='card'><div class='t'>{H.escape(title)}</div>{body_html}</div>")
+        parts.append("</section>")
+
     parts.append(
-        f"<div class='footer'>{H.escape(FOOTER_CALIBER)}<br>{H.escape(FOOTER_DISCIPLINE)}</div>"
+        f"<div class='footer'>{H.escape(FOOTER_CALIBER)}<br>{H.escape(FOOTER_LINES)}<br>"
+        f"{H.escape(FOOTER_DISCIPLINE)}</div>"
         "</main></body></html>")
     return "\n".join(parts)
 
