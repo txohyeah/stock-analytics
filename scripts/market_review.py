@@ -30,6 +30,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from scripts.market_state import connect, update  # noqa: E402
+from scripts.market_lines import lines_section  # noqa: E402
 
 DB = ROOT / "data" / "stock.db"
 
@@ -317,6 +318,9 @@ def fmt_review(con: sqlite3.Connection, date: str) -> str:
         out.append(f"　（中期状态「{state_short}」样本内参照 2018-2026：该状态 {st[2]:,} 笔起爆，"
                    f"f20 均值 {st[0]:+.2f}%、中位 {st[1]:+.2f}%——历史统计，不是承诺）")
 
+    # —— 画线台账（2026-10-22 增：用户手绘线每日监控 + MTR 结构锚 + MACD 状态）——
+    out += lines_section(con, cur["trade_date"])
+
     out.append("")
     out.append("口径：等权指数 = 全市场个股当日涨跌幅（截尾 ±21%）横截面均值逐日累乘（2017 起）；"
                "方向 = 指数 vs 自身 MA60；宽度 = 20 日上涨家数占比 >50% 判宽；"
@@ -326,6 +330,10 @@ def fmt_review(con: sqlite3.Connection, date: str) -> str:
                "涨停/跌停 = 近似口径（主板 10%、创业科创 20%、北交 30%、主板 ST 5%，收盘触板判定，新股上市初期有误差）；"
                "指数 = tushare 指数日线，两市成交额 = 上证指数+深证综指成交额合计，两融 = 沪深融资融券余额（T-1 披露）；"
                f"板块 = tushare 行业分类（≥{SECTOR_MIN_N} 家），数值 = 行业内个股当日涨跌幅中位数。")
+    out.append("画线台账 = 用户手绘线（登记日 point-in-time 存档），失效 = 收盘穿越（压力站上/支撑跌破），"
+               "盘中触碰不算，只提醒不催改；结构锚 = Brooks MTR swing（LH+LL→空头偏/HH+HL→多头偏/混合中性，"
+               "左右1根确认、回看40根，复用 pa_engine 原实现）；MACD = 12/26/9 标准 EMA 递推，"
+               "数值与通达信可能有零点几的初始化差异，定性一致。")
     out.append("纪律：只报状态，不作买卖建议、不当过滤器；结论出自 2018-2026 样本内。")
     return "\n".join(out)
 
