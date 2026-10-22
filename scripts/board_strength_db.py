@@ -120,13 +120,22 @@ def fetch_live(timeout=25):
 
 
 def latest_trade_date():
+    """只依赖 trade_cal（日历是静态的），不依赖 20:10 才同步的 daily 表；
+    收盘后(>=15:05)当日即算交易日，否则回退到上一个交易日。"""
+    now = datetime.now()
+    today = now.strftime('%Y%m%d')
     try:
         con = sqlite3.connect(f'file:{STOCK_DB}?mode=ro', uri=True)
-        d = con.execute('SELECT max(trade_date) FROM daily').fetchone()[0]
+        if now.hour * 60 + now.minute < 15 * 60 + 5:
+            d = con.execute('SELECT max(cal_date) FROM trade_cal WHERE is_open=1 AND cal_date<?',
+                            (today,)).fetchone()[0]
+        else:
+            d = con.execute('SELECT max(cal_date) FROM trade_cal WHERE is_open=1 AND cal_date<=?',
+                            (today,)).fetchone()[0]
         con.close()
-        return f'{d[:4]}-{d[4:6]}-{d[6:]}' if d else datetime.now().strftime('%Y-%m-%d')
+        return f'{d[:4]}-{d[4:6]}-{d[6:]}' if d else now.strftime('%Y-%m-%d')
     except Exception:
-        return datetime.now().strftime('%Y-%m-%d')
+        return now.strftime('%Y-%m-%d')
 
 
 def backfill(user_days=400):
@@ -164,22 +173,48 @@ def snapshot():
                         'ON CONFLICT(alias) DO UPDATE SET canonical=excluded.canonical',
                         list(alias.items()))
     known = dict(con.execute('SELECT alias, canonical FROM board_alias'))
+    prev = dict(con.execute('SELECT name,value FROM board_strength WHERE date=?', (date,)).fetchall())
     rows = []
     for i, (code, nm, val, zt) in enumerate(live, 1):
         rows.append((date, known.get(nm, nm), val, zt, i, code, 'live'))
+    changed = [(r[1], prev[r[1]], r[2]) for r in rows if r[1] in prev and prev[r[1]] != r[2]]
     con.executemany(
         'INSERT INTO board_strength(date,name,value,zt_count,rank,code,scope) '
         'VALUES(?,?,?,?,?,?,?) ON CONFLICT(date,name) DO UPDATE SET '
         'value=excluded.value, zt_count=excluded.zt_count, rank=excluded.rank, '
         'code=excluded.code, scope=excluded.scope', rows)
+    delta_note = ''
+    if changed:
+        big = max(changed, key=lambda x: abs(x[2] - x[1]))
+        delta_note = f'changed={len(changed)};max_delta={big[2]-big[1]:+d}({big[0]})'
     con.execute('INSERT INTO capture_log VALUES(?,?,?,?,?)',
                 (datetime.now().isoformat(timespec='seconds'), 'snapshot', 1, len(rows),
-                 f'date={date};alias={len(alias)}'))
+                 f'date={date};alias={len(alias)};{delta_note}'))
     con.commit()
-    print(f'快照入库: {date} 共 {len(rows)} 个板块, 新增名称对齐 {len(alias)} 个')
+    print(f'快照入库: {date} 共 {len(rows)} 个板块, 新增名称对齐 {len(alias)} 个'
+          + (f', 数值变动 {len(changed)} 个（{delta_note}）' if changed else ', 数值无变动'))
     print(f'库内现状: {DB.stat().st_size/1024:.0f} KB')
     con.close()
     return date, live
+
+
+def peek(top=10):
+    """只读盘中/盘后快照：打印前 top 名 + 市场宽度，不写库"""
+    live = fetch_live()
+    pos = [x for x in live if x[2] > 0]
+    over8k = [x for x in live if x[2] >= 8000]
+    over13k = [x for x in live if x[2] >= 13000]
+    over17k = [x for x in live if x[2] >= 17000]
+    print(f'开盘啦板块强度实时快照（{datetime.now().strftime("%H:%M")}）')
+    print(f'{"#":>2} {"板块":<14}{"强度":>9}{"涨停":>5}')
+    for i, (code, nm, val, zt) in enumerate(live[:top], 1):
+        print(f'{i:>2} {nm:<14}{val:>9}{zt:>5}')
+    topv = live[0][2]
+    tier = '进攻' if topv >= 17000 else '正常' if topv >= 13000 else '正常偏弱' if topv >= 8000 else '防守'
+    print(f'\n第一名 {live[0][1]} {topv:,} → {tier}')
+    print(f'市场宽度: {len(live)} 个板块中 正强度 {len(pos)} 个 / ≥8000 {len(over8k)} 个 / '
+          f'≥1.3万 {len(over13k)} 个 / ≥1.7万 {len(over17k)} 个')
+    return live
 
 
 def report(top=10):
@@ -201,12 +236,15 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--backfill', type=int, nargs='?', const=400)
     ap.add_argument('--snapshot', action='store_true')
+    ap.add_argument('--peek', action='store_true', help='只读实时前十 + 市场宽度，不写库')
     ap.add_argument('--report', action='store_true')
     a = ap.parse_args()
     if a.backfill:
         backfill(a.backfill)
     if a.snapshot:
         snapshot()
+    if a.peek:
+        peek()
     if a.report:
         report()
 
