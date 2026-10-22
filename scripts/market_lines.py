@@ -23,6 +23,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
+import pandas as pd
+
 # pa_engine（Brooks MTR 结构锚）零第三方依赖，直接 import 原实现
 PA_ENGINE_DIR = "/root/.qwenpaw/workspaces/default/pa-crypto-4h"
 if PA_ENGINE_DIR not in sys.path:
@@ -31,6 +33,9 @@ from pa_engine import mtr_anchor, _swing_highs, _swing_lows  # noqa: E402
 
 MACD_CODE = "000001.SH"          # 结构/MACD 都以上证指数日线为准
 MACD_TOUCH_TOL = 0.005           # 盘中触线容差：高点距线 0.5% 内算"触线"
+# market_lines 表列序（显式列名 zip 用，兼容裸 tuple 连接与 Row 连接）
+_COLS = ["id", "name", "kind", "line_type", "p1_date", "p1_price", "p2_date", "p2_price",
+         "slope_per_day", "note", "status", "created_date", "archived_date"]
 
 
 # ---------------- 表 + 种子线 ----------------
@@ -109,9 +114,7 @@ def monitor_lines(con: sqlite3.Connection, date: str) -> list[str]:
     ensure_table(con)
     tmap = _tmap(con)
     # 显式列名 zip：对裸 tuple 连接和 Row 连接都工作，不依赖 row_factory
-    _cols = ["id", "name", "kind", "line_type", "p1_date", "p1_price", "p2_date", "p2_price",
-             "slope_per_day", "note", "status", "created_date", "archived_date"]
-    lines = [dict(zip(_cols, r)) for r in con.execute(
+    lines = [dict(zip(_COLS, r)) for r in con.execute(
         "SELECT * FROM market_lines WHERE status='active' ORDER BY id").fetchall()]
     if not lines:
         return ["⑧画线台账：（无登记线）"]
@@ -230,11 +233,8 @@ def structure_lines(con: sqlite3.Connection, date: str) -> list[str]:
     return out
 
 
-def macd_state(closes: list[float]) -> str:
-    """国内口径：DIF=EMA12-EMA26，DEA=EMA9(DIF)，柱=2*(DIF-DEA)；报零轴/叉/柱变化。"""
-    if len(closes) < 60:
-        return "样本不足"
-
+def _macd_series(closes: list[float]) -> tuple[list[float], list[float], list[float]]:
+    """国内口径 MACD 序列（唯一实现，macd_state 与画图共用）：DIF=EMA12-EMA26，DEA=EMA9(DIF)，柱=2*(DIF-DEA)。"""
     def ema(vals: list[float], n: int) -> list[float]:
         a = 2.0 / (n + 1)
         out = [vals[0]]
@@ -246,6 +246,14 @@ def macd_state(closes: list[float]) -> str:
     dif = [a - b for a, b in zip(e12, e26)]
     dea = ema(dif, 9)
     bar = [2 * (d - e) for d, e in zip(dif, dea)]
+    return dif, dea, bar
+
+
+def macd_state(closes: list[float]) -> str:
+    """国内口径：DIF=EMA12-EMA26，DEA=EMA9(DIF)，柱=2*(DIF-DEA)；报零轴/叉/柱变化。"""
+    if len(closes) < 60:
+        return "样本不足"
+    dif, dea, bar = _macd_series(closes)
     diff = [d - e for d, e in zip(dif, dea)]
     # 最近一次变号 = 最近金叉/死叉
     cross_i = None
@@ -282,3 +290,129 @@ def lines_section(con: sqlite3.Connection, date: str) -> list[str]:
     except Exception as e:
         part2 = [f"⑨结构参考：（出错 {type(e).__name__}: {e}）"]
     return part1 + part2
+
+
+# ---------------- 画线台账 K 线图（HTML 内嵌 base64） ----------------
+
+_FONT = "/usr/share/fonts/google-droid/DroidSansFallback.ttf"
+_UP, _DN = "#d92626", "#16a34a"          # 与复盘 HTML CSS 同色（红涨绿跌）
+_TREND = "#1150d6"                        # 手绘线蓝（沿用首张对照图配色）
+_GOLD_UP, _GOLD_DN = "#e07b00", "#c9a227"  # 金牛因果上/下沿
+
+
+def render_lines_chart(con: sqlite3.Connection, date: str, window: int = 125) -> bytes | None:
+    """上证 K 线 + 金牛因果通道 + 全部 active 手绘线 + MACD 副图 → PNG bytes。
+
+    无 active 线或数据缺失时返回 None（调用方不嵌图）。
+    """
+    rows = con.execute(
+        "SELECT trade_date, open, high, low, close FROM index_daily "
+        "WHERE ts_code='000001.SH' AND trade_date<=? ORDER BY trade_date DESC LIMIT ?",
+        (date, window)).fetchall()
+    rows = rows[::-1]
+    if len(rows) < 30 or rows[-1][0] != date:
+        return None
+    active = [dict(zip(_COLS, r)) for r in con.execute(
+        "SELECT * FROM market_lines WHERE status='active' ORDER BY id").fetchall()]
+    if not active:
+        return None
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib import font_manager
+    from matplotlib.patches import Rectangle
+    import io
+    if not any(f.name == "Droid Sans Fallback" for f in font_manager.fontManager.ttflist):
+        font_manager.fontManager.addfont(_FONT)
+    plt.rcParams["font.sans-serif"] = ["Droid Sans Fallback"]
+    plt.rcParams["axes.unicode_minus"] = False
+
+    sys.path.insert(0, "/home/application/tech-indicators/src")
+    from tech_indicators.indicators import compute_golden_bull_lines
+
+    tmap = _tmap(con)
+    dates = [r[0] for r in rows]
+    o = [r[1] for r in rows]
+    h = [r[2] for r in rows]
+    l = [r[3] for r in rows]
+    c = [r[4] for r in rows]
+    n = len(rows)
+    xi = list(range(n))
+
+    # 金牛因果版：全历史喂，取窗口段（避免窗口起点边界效应）
+    full = con.execute(
+        "SELECT high, low FROM index_daily WHERE ts_code='000001.SH' AND trade_date<=? ORDER BY trade_date",
+        (date,)).fetchall()
+    gdf = pd.DataFrame(full, columns=["high", "low"]).astype(float)
+    gb = compute_golden_bull_lines(gdf, causal=True)
+    off = len(full) - n
+    g_up = gb["channel_upper"].values[off:off + n]
+    g_lo = gb["channel_lower"].values[off:off + n]
+
+    dif, dea, bar = _macd_series(c)
+
+    fig = plt.figure(figsize=(12.8, 9.0), dpi=110)
+    gs = fig.add_gridspec(2, 1, height_ratios=[3.1, 1.0], hspace=0.06,
+                          left=0.055, right=0.985, top=0.93, bottom=0.06)
+    ax = fig.add_subplot(gs[0])
+    axm = fig.add_subplot(gs[1], sharex=ax)
+
+    # 金牛通道带 + 上下沿
+    ax.fill_between(xi, g_lo, g_up, color="#f5c518", alpha=0.13, zorder=1)
+    ax.plot(xi, g_up, color=_GOLD_UP, lw=1.4, label="金牛上沿（因果版）", zorder=4)
+    ax.plot(xi, g_lo, color=_GOLD_DN, lw=1.0, label="金牛下沿（因果版）", zorder=4)
+
+    # K 线
+    w = 0.36
+    for k in range(n):
+        col = _UP if c[k] >= o[k] else _DN
+        ax.plot([k, k], [l[k], h[k]], color=col, lw=0.6, zorder=3)
+        ax.add_patch(Rectangle((k - w, min(o[k], c[k])), 2 * w,
+                               max(abs(c[k] - o[k]), 0.4), facecolor=col, edgecolor=col, zorder=4))
+
+    # active 手绘线（窗口内逐日取值；斜线只画锚点之后的段，不做外推）
+    for ln in active:
+        ys = [line_value(ln, d, tmap) for d in dates]
+        px = [(k, y) for k, y in enumerate(ys) if y is not None and dates[k] >= ln["p1_date"]]
+        if not px:
+            continue
+        ax.plot([p[0] for p in px], [p[1] for p in px], color=_TREND, lw=2.0,
+                ls=(0, (6, 3)), zorder=6)
+        k, y = px[-1]
+        ax.annotate(f"{ln['name']} {y:.0f}", (k, y), xytext=(6, 0), textcoords="offset points",
+                    fontsize=9, color=_TREND, va="center", fontweight="bold")
+
+    ax.legend(loc="upper right", fontsize=9, framealpha=0.9)
+    ax.grid(alpha=0.22, lw=0.5)
+    ax.set_ylabel("上证指数", fontsize=10)
+    ax.set_title(f"上证指数 · 画线台账 {date[:4]}-{date[4:6]}-{date[6:]}（金牛=因果版，与引擎同款）",
+                 fontsize=13, fontweight="bold", pad=8)
+    plt.setp(ax.get_xticklabels(), visible=False)
+
+    # MACD 副图
+    bx = [k - 0.36 for k in xi]
+    axm.bar(bx, bar, width=0.72, color=[_UP if b >= 0 else _DN for b in bar], alpha=0.75, zorder=3)
+    axm.plot(xi, dif, color="#e07b00", lw=1.1, label="DIF", zorder=4)
+    axm.plot(xi, dea, color="#2563eb", lw=1.1, label="DEA", zorder=4)
+    axm.axhline(0, color="#888", lw=0.6, zorder=2)
+    axm.legend(loc="upper right", fontsize=8, ncol=2, framealpha=0.9)
+    axm.grid(alpha=0.22, lw=0.5)
+    axm.set_ylabel("MACD", fontsize=10)
+
+    # x 轴月份刻度
+    ticks, labels, prev = [], [], ""
+    for k, d in enumerate(dates):
+        m = d[:6]
+        if m != prev:
+            ticks.append(k)
+            labels.append(f"{int(d[4:6])}月")
+            prev = m
+    axm.set_xticks(ticks)
+    axm.set_xticklabels(labels, fontsize=10)
+    ax.set_xlim(-2, n + 1)
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png")
+    plt.close(fig)
+    return buf.getvalue()

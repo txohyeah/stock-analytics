@@ -21,6 +21,7 @@ stdout 末行（cron 文字回复专用）：
 from __future__ import annotations
 
 import argparse
+import base64
 import html as H
 import json
 import os
@@ -40,7 +41,7 @@ from scripts.market_review import (  # noqa: E402
     day_counts, index_section, kline_section, limit_counts, sector_section,
 )
 from scripts.market_state import connect, update  # noqa: E402
-from scripts.market_lines import lines_section  # noqa: E402
+from scripts.market_lines import lines_section, render_lines_chart  # noqa: E402
 
 OUT_DIR = ROOT / "reports"
 
@@ -157,11 +158,19 @@ def collect(con: sqlite3.Connection, date: str) -> dict:
 
     sh = con.execute("SELECT close, pct_chg FROM index_daily WHERE ts_code='000001.SH' "
                      "AND trade_date = ?", (td,)).fetchone()
+    # ⑧画线台账配图：K线+金牛因果通道+手绘线+MACD（base64 内嵌，无 active 线时为 None）
+    try:
+        png = render_lines_chart(con, td)
+        lines_png = base64.b64encode(png).decode() if png else None
+    except Exception as e:
+        print(f"[warn] 画线台账配图失败：{type(e).__name__}: {e}", file=sys.stderr)
+        lines_png = None
     return {
         "date": td, "d": d, "wk": "一二三四五六日"[pd.Timestamp(d).weekday()],
         "counts": c, "lc": lc, "kl_lines": kl_lines, "kl_summary": kl_summary,
         "sec_lines": sec_lines, "idx_lines": idx_lines,
         "lines_rows": lines_section(con, td),
+        "lines_png": lines_png,
         "ew_idx": cur["ew_idx"], "ew_ma60": cur["ew_ma60"], "dir_zh": dir_zh, "gap": gap,
         "slope_pct": slope_pct, "slope_zh": slope_zh, "b_now": b_now, "b_prev_txt": b_prev_txt,
         "ew_ret": ew_ret, "up_pct": up_pct, "day_tag": day_tag, "amp_note": amp_note,
@@ -329,6 +338,11 @@ def render(v: dict) -> str:
                 else:
                     body_html += f"<div class='b'>{txt}</div>"
             parts.append(f"<div class='card'><div class='t'>{H.escape(title)}</div>{body_html}</div>")
+        if v.get("lines_png"):
+            parts.append(
+                f"<div class='card' style='padding:6px'>"
+                f"<img style='width:100%;display:block;border-radius:6px' "
+                f"src='data:image/png;base64,{v['lines_png']}' alt='画线台账K线图'></div>")
         parts.append("</section>")
 
     parts.append(
