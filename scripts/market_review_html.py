@@ -45,6 +45,15 @@ from scripts.market_lines import lines_section, render_lines_chart  # noqa: E402
 
 OUT_DIR = ROOT / "reports"
 
+CHART_JS_PATH = Path('/root/.qwenpaw/workspaces/default/projects/paper-sim/dist/assets/chart.js')
+
+
+def _chart_js() -> str:
+    """paper-sim 与飞书 HTML 共用的 canvas 渲染器（单一真源，勿复制代码）。"""
+    return CHART_JS_PATH.read_text(encoding='utf-8')
+
+
+
 # 与 fmt_review 尾部逐字一致的口径/纪律文本（改一处必须同步两处）
 FOOTER_CALIBER = (
     "口径：等权指数 = 全市场个股当日涨跌幅（截尾 ±21%）横截面均值逐日累乘（2017 起）；"
@@ -158,19 +167,27 @@ def collect(con: sqlite3.Connection, date: str) -> dict:
 
     sh = con.execute("SELECT close, pct_chg FROM index_daily WHERE ts_code='000001.SH' "
                      "AND trade_date = ?", (td,)).fetchone()
-    # ⑧画线台账配图：K线+金牛因果通道+手绘线+MACD（base64 内嵌，无 active 线时为 None）
+    # ⑧画线台账配图：优先「数据 + 前端 canvas」（与 paper-sim 站点同一渲染器），失败降级 PNG
+    chart_payload = None
+    lines_png = None
     try:
-        png = render_lines_chart(con, td)
-        lines_png = base64.b64encode(png).decode() if png else None
+        from scripts.market_chart import build_payload
+        chart_payload = build_payload(con, td)
     except Exception as e:
-        print(f"[warn] 画线台账配图失败：{type(e).__name__}: {e}", file=sys.stderr)
-        lines_png = None
+        print(f"[warn] 画线台账数据包失败：{type(e).__name__}: {e}", file=sys.stderr)
+    if not chart_payload:
+        try:
+            png = render_lines_chart(con, td)
+            lines_png = base64.b64encode(png).decode() if png else None
+        except Exception as e:
+            print(f"[warn] 画线台账配图失败：{type(e).__name__}: {e}", file=sys.stderr)
     return {
         "date": td, "d": d, "wk": "一二三四五六日"[pd.Timestamp(d).weekday()],
         "counts": c, "lc": lc, "kl_lines": kl_lines, "kl_summary": kl_summary,
         "sec_lines": sec_lines, "idx_lines": idx_lines,
         "lines_rows": lines_section(con, td),
         "lines_png": lines_png,
+        "chart_payload": chart_payload,
         "ew_idx": cur["ew_idx"], "ew_ma60": cur["ew_ma60"], "dir_zh": dir_zh, "gap": gap,
         "slope_pct": slope_pct, "slope_zh": slope_zh, "b_now": b_now, "b_prev_txt": b_prev_txt,
         "ew_ret": ew_ret, "up_pct": up_pct, "day_tag": day_tag, "amp_note": amp_note,
@@ -338,12 +355,26 @@ def render(v: dict) -> str:
                 else:
                     body_html += f"<div class='b'>{txt}</div>"
             parts.append(f"<div class='card'><div class='t'>{H.escape(title)}</div>{body_html}</div>")
-        if v.get("lines_png"):
+        if v.get("chart_payload"):
+            parts.append(
+                "<div class='card' style='padding:6px'>"
+                "<canvas id='mktchart' style='width:100%;display:block;height:520px'></canvas></div>")
+        elif v.get("lines_png"):
             parts.append(
                 f"<div class='card' style='padding:6px'>"
                 f"<img style='width:100%;display:block;border-radius:6px' "
                 f"src='data:image/png;base64,{v['lines_png']}' alt='画线台账K线图'></div>")
         parts.append("</section>")
+
+    if v.get("chart_payload"):
+        parts.append("<script>" + _chart_js() + "</script>")
+        pj = json.dumps(v["chart_payload"], ensure_ascii=False).replace("</", "<\\/")
+        parts.append(
+            "<script>var PAYLOAD=" + pj + ";(function(){var cv=document.getElementById('mktchart');"
+            "if(!cv||!window.MarketChart)return;var rend=function(){var m=window.matchMedia;"
+            "var dk=!!(m&&m('(prefers-color-scheme: dark)').matches);"
+            "MarketChart.render(cv,PAYLOAD,{height:520,dark:dk});};rend();"
+            "window.addEventListener('resize',rend);})();</script>")
 
     parts.append(
         f"<div class='footer'>{H.escape(FOOTER_CALIBER)}<br>{H.escape(FOOTER_LINES)}<br>"
