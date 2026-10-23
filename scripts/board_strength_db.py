@@ -221,7 +221,9 @@ def direct_snapshot(date=None, workers=4):
 
 def latest_trade_date():
     """只依赖 trade_cal（日历是静态的），不依赖 20:10 才同步的 daily 表；
-    收盘后(>=15:05)当日即算交易日，否则回退到上一个交易日。"""
+    收盘后(>=15:05)当日即算交易日，否则回退到上一个交易日。
+    防御：15:05 后若当日不在日历（日历滞后），工作日直接归属当日——
+    该时点接口返回的实时值必属当日，绝不能静默写到昨日（2026-10-23 事故）。"""
     now = datetime.now()
     today = now.strftime('%Y%m%d')
     try:
@@ -232,6 +234,12 @@ def latest_trade_date():
         else:
             d = con.execute('SELECT max(cal_date) FROM trade_cal WHERE is_open=1 AND cal_date<=?',
                             (today,)).fetchone()[0]
+            if d is None or d < today:
+                has_row = con.execute('SELECT is_open FROM trade_cal WHERE cal_date=?',
+                                      (today,)).fetchone()
+                if has_row is None and now.weekday() < 5:
+                    print(f'[WARN] trade_cal 缺 {today}（日历滞后），15:05 后强制归属当日')
+                    d = today
         con.close()
         return f'{d[:4]}-{d[4:6]}-{d[6:]}' if d else now.strftime('%Y-%m-%d')
     except Exception:
@@ -294,6 +302,9 @@ def snapshot():
     if changed:
         big = max(changed, key=lambda x: abs(x[2] - x[1]))
         delta_note = f'changed={len(changed)};max_delta={big[2]-big[1]:+d}({big[0]})'
+        if abs(big[2] - big[1]) > 10000:
+            delta_note += ';SUSPICIOUS'
+            print(f'[WARN] {big[0]} 单日变动 {big[2]-big[1]:+d} 超过 10000，疑似日期归属错误或极端行情，请人工核对')
     con.execute('INSERT INTO capture_log VALUES(?,?,?,?,?)',
                 (datetime.now().isoformat(timespec='seconds'), 'snapshot', 1, len(rows),
                  f'date={date};alias={len(alias)};{delta_note}'))
