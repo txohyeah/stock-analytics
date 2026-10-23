@@ -35,7 +35,8 @@ SCHEMA = {
         money_cap REAL, st_borr REAL, lt_borr REAL, bond_payable REAL)""",
     "fina_indicator": """CREATE TABLE fina_indicator (ts_code TEXT, end_date TEXT, ann_date TEXT,
         profit_dedt REAL, dt_netprofit_yoy REAL, netprofit_yoy REAL, netprofit_margin REAL,
-        grossprofit_margin REAL, turn_days REAL, interestdebt REAL, debt_to_assets REAL)""",
+        grossprofit_margin REAL, turn_days REAL, interestdebt REAL, debt_to_assets REAL,
+        extra_item REAL)""",
     "stock_basic": "CREATE TABLE stock_basic (ts_code TEXT, name TEXT, industry TEXT)",
     "fina_audit": "CREATE TABLE fina_audit (ts_code TEXT, end_date TEXT, audit_result TEXT)",
 }

@@ -16,12 +16,12 @@ CODE_RE = re.compile(r"^\d{6}$")
 def code_to_ts_code(code: str) -> str:
     if not CODE_RE.match(code):
         raise UserInputError(f"Invalid stock code: {code}")
-    if code.startswith(("6", "9", "4", "8", "5")):
+    if code.startswith(("43", "83", "87", "92", "4")):
+        return f"{code}.BJ"
+    if code.startswith(("6", "900", "5")):
         return f"{code}.SH"
     if code.startswith(("0", "2", "3")):
         return f"{code}.SZ"
-    if code.startswith(("4", "8", "9")):
-        return f"{code}.BJ"
     return f"{code}.SZ"
 
 
@@ -38,7 +38,7 @@ def normalize_code(raw: str) -> StockCode:
     if value.startswith(("SH", "SZ", "BJ")) and len(value) == 8:
         base = value[2:]
         if CODE_RE.match(base):
-            return StockCode(raw=raw, code=base, ts_code=code_to_ts_code(base))
+            return StockCode(raw=raw, code=base, ts_code=f"{base}.{value[:2]}")
 
     if value.isdigit() and len(value) == 7 and value.startswith(("0", "1")):
         value = value[1:]

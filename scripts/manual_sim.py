@@ -314,7 +314,8 @@ def fill_sell(con: sqlite3.Connection, scon: sqlite3.Connection, o: dict,
             (fill_date, price_adj, price_raw, f"手动（{o.get('reason') or '指令卖出'}）",
              proceeds - fee, pnl, ret, pos["id"]))
     else:
-        con.execute("UPDATE manual_positions SET shares=? WHERE id=?", (left, pos["id"]))
+        con.execute("UPDATE manual_positions SET shares=?, cost=? WHERE id=?",
+                    (left, pos["cost"] - cost_part, pos["id"]))
     con.execute(
         "INSERT INTO manual_trades (position_id, ts_code, name, source, entry_date, exit_date, "
         "entry_price_adj, exit_price_adj, entry_price_raw, exit_price_raw, shares, cost, proceeds, "

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Any
 
@@ -441,18 +442,19 @@ def _sum_position_pct(items: list[AccountPositionReview]) -> float:
 
 
 def _parse_position_size_pct(value: object) -> float | None:
-    text = str(value or "").strip()
+    text = "" if value is None else str(value).strip()
     if not text:
         return None
-    if text.endswith("%"):
+    is_percent = text.endswith("%")
+    if is_percent:
         text = text[:-1].strip()
     try:
         parsed = float(text)
     except ValueError:
         return None
-    if parsed < 0:
+    if not math.isfinite(parsed) or parsed < 0:
         return None
-    return parsed * 100 if 0 < parsed <= 1 else parsed
+    return parsed * 100 if not is_percent and 0 < parsed <= 1 else parsed
 
 
 def _normalize_position_type(value: object) -> str:

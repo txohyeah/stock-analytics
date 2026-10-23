@@ -11,12 +11,13 @@
 - 数据库未同步（无表/空表）时抛 DataInsufficientError 并给出按需同步命令
 
 评级映射（文章综合判定）：
-  任一红 -> 高（排雷未通过）；有黄无红 -> 中（需深挖）；全绿 -> 低（通过排雷关）。
+  任一红 -> 高；有黄无红 -> 中；全绿 -> 低；无红黄但检查缺失 -> 数据不足。
 """
 
 from __future__ import annotations
 
 import sqlite3
+import math
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,7 +27,8 @@ from .errors import DataInsufficientError, DatabaseConnectionError
 from .repository import DEFAULT_DB_PATH
 
 RED, YELLOW, GREEN = "红", "黄", "绿"
-SKIP = "sk"
+UNKNOWN = "数据不足"
+SKIP = UNKNOWN
 SYNC_HINT = (
     "先同步 finance 组：./venv/bin/python -m app.cli sync finance --ts-codes <codes>"
     "（全市场：--mode history，脚本 scripts/backfill_finance.sh）"
@@ -42,18 +44,18 @@ class StockResult:
     name: str
     industry: str
     annual: list  # list of dict rows sorted desc by end_date
-    r0: str = GREEN          # 雷区零 审计意见（非标前置闸门）
-    r0_detail: str = ""
-    r1: str = GREEN          # 雷区一 利润结构（扣非/归母 + 扣非同比）
-    r1_detail: str = ""
-    r2: str = GREEN          # 雷区二 现金流质量（经营现金流净额连续为负 + 现金/利润比率）
-    r2_detail: str = ""
-    r3: str = GREEN          # 雷区三 商誉（商誉/归母净资产）
-    r3_detail: str = ""
-    r4: str = GREEN          # 雷区四 业绩拐点（最新报告期营收/归母同比转负）
-    r4_detail: str = ""
+    r0: str = UNKNOWN        # 雷区零 审计意见（非标前置闸门）
+    r0_detail: str = "审计意见数据不足"
+    r1: str = UNKNOWN        # 雷区一 利润结构（扣非/归母 + 扣非同比）
+    r1_detail: str = "利润结构数据不足"
+    r2: str = UNKNOWN        # 雷区二 现金流质量（经营现金流净额连续为负 + 现金/利润比率）
+    r2_detail: str = "现金流质量数据不足"
+    r3: str = UNKNOWN        # 雷区三 商誉（商誉/归母净资产）
+    r3_detail: str = "商誉或归母净资产数据不足"
+    r4: str = UNKNOWN        # 雷区四 业绩拐点（最新报告期营收/归母同比转负）
+    r4_detail: str = "业绩拐点数据不足"
     deep_checks: list = field(default_factory=list)  # 深度排雷检查项（李神奇方法扩展）
-    rating: str = GREEN      # 综合 暴雷可能性
+    rating: str = UNKNOWN    # 综合 暴雷可能性
     reasons: list = field(default_factory=list)
 
 
@@ -255,7 +257,8 @@ def _to_float(v: Any) -> float | None:
         if not v:
             return None
     try:
-        return float(v)
+        value = float(v)
+        return value if math.isfinite(value) else None
     except (TypeError, ValueError):
         return None
 
@@ -516,7 +519,15 @@ def evaluate(code: str, basic: dict, annual: list, audit_map: dict[str, dict[str
             continue
         seen_year.add(y)
         ann_dedup.append(r)
-    annual = ann_dedup
+    # 缺失、空字符串及非有限数值不能使检查误判为已执行。
+    numeric_fields = (
+        "n_income_attr_p", "profit_dedt", "dt_netprofit_yoy", "netprofit_yoy",
+        "n_cashflow_act", "n_income", "goodwill", "total_hldr_eqy_exc_min_int",
+    )
+    annual = [
+        {**r, **{key: _to_float(r.get(key)) for key in numeric_fields}}
+        for r in ann_dedup
+    ]
     res = StockResult(ts_code=code, name=name, industry=industry, annual=annual)
 
     # ================= 雷区零：审计意见（非标前置闸门） =================
@@ -615,8 +626,15 @@ def evaluate(code: str, basic: dict, annual: list, audit_map: dict[str, dict[str
     if r1_flags:
         res.r1 = RED if RED in r1_flags else YELLOW
         res.r1_detail = "；".join(r1_parts)
-    else:
+    elif (latest is not None
+          and all(r.get(key) is not None for r in annual
+                  for key in ("n_income_attr_p", "profit_dedt", "dt_netprofit_yoy"))
+          and latest.get("netprofit_yoy") is not None
+          and latest["n_income_attr_p"] > 0 and latest["profit_dedt"] >= 0):
+        res.r1 = GREEN
         res.r1_detail = "扣非/归母比率健康且扣非同比为正"
+    else:
+        res.r1_detail = "利润结构数据不足或比率无法计算（需归母、扣非净利润及同比数据）"
 
     # ================= 雷区二：现金流质量 =================
     neg_years = [_end_year(r["end_date"]) for r in annual if r.get("n_cashflow_act") is not None and r["n_cashflow_act"] < 0]
@@ -644,14 +662,19 @@ def evaluate(code: str, basic: dict, annual: list, audit_map: dict[str, dict[str
         if latest_ocf_ratio is not None and 0 <= latest_ocf_ratio < 0.5:
             parts.append(f"经营现金流/净利润={latest_ocf_ratio:.2f}(0~0.5)")
         res.r2_detail = "；".join(parts)
-    else:
+    elif (latest_ocf_ratio is not None
+          and all(r.get("n_cashflow_act") is not None for r in annual)):
+        res.r2 = GREEN
         res.r2_detail = "经营现金流持续为正且质量健康"
+    else:
+        res.r2_detail = "现金流质量数据不足或比率无法计算（需经营现金流及正值净利润）"
 
     # ================= 雷区三：商誉（对齐手册：>30% 红、15%~30% 黄、<=15% 绿） =================
     if latest is not None:
         gw = latest.get("goodwill")
         eq = latest.get("total_hldr_eqy_exc_min_int")  # 归母股东权益
         if gw is not None and eq is not None:
+            res.r3 = GREEN
             if eq <= 0:
                 res.r3 = RED
                 res.r3_detail = f"归母股东权益 {eq:.0f}（资不抵债）"
@@ -672,8 +695,8 @@ def evaluate(code: str, basic: dict, annual: list, audit_map: dict[str, dict[str
     # trend 参数已是该股票的最新报告期字典（bulk_fetch 的 trend_map[code]）
     t = trend if trend else None
     if t and t.get("latest_ed"):
-        cur_rev, prev_rev = t.get("rev"), t.get("prev_rev")
-        cur_np, prev_np = t.get("np"), t.get("prev_np")
+        cur_rev, prev_rev = _to_float(t.get("rev")), _to_float(t.get("prev_rev"))
+        cur_np, prev_np = _to_float(t.get("np")), _to_float(t.get("prev_np"))
         if all(v is not None and v != 0 for v in (cur_rev, prev_rev, cur_np, prev_np)):
             r_yoy = (cur_rev - prev_rev) / abs(prev_rev)
             n_yoy = (cur_np - prev_np) / abs(prev_np)
@@ -683,6 +706,7 @@ def evaluate(code: str, basic: dict, annual: list, audit_map: dict[str, dict[str
                 res.r4 = YELLOW
                 res.r4_detail = detail + "（最新报告期营收或归母同比转负：业绩拐点预警）"
             else:
+                res.r4 = GREEN
                 res.r4_detail = detail + "（最新报告期营收、归母同比均为正）"
         else:
             res.r4 = SKIP
@@ -703,6 +727,8 @@ def evaluate(code: str, basic: dict, annual: list, audit_map: dict[str, dict[str
         res.rating = "高"
     elif YELLOW in levels or YELLOW in deep_levels:
         res.rating = "中"
+    elif UNKNOWN in flags:
+        res.rating = UNKNOWN
     else:
         res.rating = "低"
     for tag, level, detail in (
@@ -712,7 +738,7 @@ def evaluate(code: str, basic: dict, annual: list, audit_map: dict[str, dict[str
         ("三", res.r3, res.r3_detail),
         ("四", res.r4, res.r4_detail),
     ):
-        if level in (RED, YELLOW):
+        if level in (RED, YELLOW, UNKNOWN):
             res.reasons.append(f"雷区{tag}·{detail}")
     for c in res.deep_checks:
         if c["level"] in (RED, YELLOW):
@@ -730,9 +756,9 @@ def _format_report(r: StockResult) -> str:
     """单票完整排雷报告：综合评级 + 触发项 + 详细检查（五雷区 + 深度）。"""
     lines = []
     lines.append(f"# {r.ts_code} {r.name} 排雷报告")
-    lines.append(f"- 行业：{r.industry or '-'} ｜ 综合评级：**{r.rating}**（任一红=高，有黄=中，全绿=低）")
+    lines.append(f"- 行业：{r.industry or '-'} ｜ 综合评级：**{r.rating}**（任一红=高，有黄=中，全绿=低；无预警但检查不完整=数据不足）")
     lines.append("")
-    lines.append("## 触发项（红/黄）")
+    lines.append("## 触发项与数据缺口（红/黄/数据不足）")
     if r.reasons:
         for reason in r.reasons:
             lines.append(f"- {reason}")
