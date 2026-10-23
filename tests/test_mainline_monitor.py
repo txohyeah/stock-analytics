@@ -32,15 +32,18 @@ class MainlineTest(unittest.TestCase):
 
     def test_absence_pauses_survival(self):
         signals, snapshots = m.replay(days([{'x': 18000}] + [{}] * 4 + [{'x': 18000}]))
-        self.assertEqual(len([s for s in signals if s['kind'] == 'FAST']), 1)
+        # V2 退出规则: 缺席第 3 日(01-04) EXIT；01-06 回榜重新确认 → 两次 FAST
+        self.assertEqual(len([s for s in signals if s['kind'] == 'FAST']), 2)
+        self.assertEqual([r[2] for r in snapshots['2026-01-04'] if r[1] == 'x'], ['EXIT'])
         self.assertEqual(snapshots['2026-01-06'][0][8], 'ACTIVE')
 
     def test_peak_decline_stays_active_and_gap_resets(self):
         _, snapshots = m.replay(days([{'x': 18000}, {'x': 7000}]))
         self.assertEqual(snapshots['2026-01-02'][0][2], 'MAINLINE')
         self.assertEqual(snapshots['2026-01-02'][0][8], 'ACTIVE')
+        # 在榜回落不退出；缺席 3 日即退出重置，回榜重新确认
         signals, _ = m.replay(days([{'x': 18000}] + [{}] * 5 + [{'x': 18000}]))
-        self.assertEqual(len(signals), 1)
+        self.assertEqual(len(signals), 2)
         signals, _ = m.replay(days([{'x': 18000}] + [{}] * 6 + [{'x': 18000}]))
         self.assertEqual(len(signals), 2)
 
@@ -69,6 +72,28 @@ class MainlineTest(unittest.TestCase):
             self.assertEqual(small_snapshots, {k: snapshots[k] for k in small_snapshots})
         values[-1] = {'x': 2000}
         self.assertFalse(any(s['kind'] == 'B' for s in m.replay(days(values))[0]))
+
+
+    def test_exit_after_three_missed_sessions(self):
+        vals = [{'x': 18000}, {}, {}, {}, {'x': 5000}]
+        signals, snaps = m.replay(days(vals))
+        exit_rows = [r for rs in snaps.values() for r in rs if r[2] == 'EXIT']
+        self.assertEqual(len(exit_rows), 1)
+        self.assertEqual(exit_rows[0][0], '2026-01-04')      # 第 3 个缺席日
+        self.assertEqual(exit_rows[0][3], 'FAST')            # 原信号类型
+        later_active = [r for d, rs in snaps.items() for r in rs
+                        if r[1] == 'x' and r[2] == 'MAINLINE' and r[8] == 'ACTIVE'
+                        and d > '2026-01-04']
+        self.assertFalse(later_active)                       # 退出后不得再报 ACTIVE
+
+    def test_return_within_two_misses_stays_mainline(self):
+        vals = [{'x': 18000}, {}, {}, {'x': 5000}]
+        signals, snaps = m.replay(days(vals))
+        exit_rows = [r for rs in snaps.values() for r in rs if r[2] == 'EXIT']
+        self.assertFalse(exit_rows)                          # 缺 2 日即回榜，不退出
+        active = [r for d, rs in snaps.items() for r in rs
+                  if r[1] == 'x' and r[2] == 'MAINLINE' and r[8] == 'ACTIVE' and d == '2026-01-04']
+        self.assertTrue(active)                              # 回榜日仍为主线
 
 
 if __name__ == '__main__':

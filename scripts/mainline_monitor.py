@@ -50,7 +50,7 @@ def replay(days):
     metadata = {}
 
     def fresh(day):
-        return {"on": [], "seg": day, "peak": -1e18,
+        return {"on": [], "seg": day, "peak": -1e18, "miss": 0,
                 "conf": None, "surv": None, "tv": None, "cd": 0}
 
     for i, d in enumerate(cal):
@@ -62,6 +62,7 @@ def replay(days):
             s = st.setdefault(n, fresh(d))
             s["on"].append(d)
             s["peak"] = max(s["peak"], v)
+            s["miss"] = 0
             metadata.setdefault(n, {})
 
         # 2) Retain an empty segment starting on the reset session.
@@ -69,6 +70,18 @@ def replay(days):
             if n not in on and s["on"] and i - didx[s["on"][-1]] > 5:
                 st[n] = fresh(d)
                 metadata[n] = {}
+
+        # 2.5) V2 exit rule: a confirmed board absent for 3 straight sessions exits.
+        for n, s in st.items():
+            if s["conf"] and n not in on:
+                s["miss"] = s.get("miss", 0) + 1
+                if s["miss"] >= 3:
+                    meta = metadata.get(n) or {}
+                    rows.append((d, n, 'EXIT', meta.get('kind'), meta.get('trig_date'),
+                                 meta.get('trig_value'), i - meta.get('role_start', i) + 1,
+                                 s['peak'], 'EXITED'))
+                    st[n] = fresh(d)
+                    metadata[n] = {}
 
         def mainline_row(n, status):
             s, meta = st[n], metadata[n]

@@ -32,24 +32,34 @@ def run_reference():
     #   surv    : None 或 剩余复核天数 int（确认当日设为 5）
     #   tv      : 触发日强度（trig_value）
     #   cd      : cooldown 剩余交易日数
+    #   miss    : 确认板块连续不在榜天数（V2 退出规则：满 3 → EXITED）
     st = {}
     sigs = []
 
     for i, d in enumerate(cal):
         on = {n: v for n, v in byd[d].items() if n not in EVENT}
 
-        # 1) 更新在榜（先于一切判定）
+        # 1) 更新在榜（先于一切判定；在榜日 miss 清零）
         for n, v in on.items():
             s = st.setdefault(n, {"on": [], "seg": d, "peak": -1e18,
-                                  "conf": None, "surv": None, "tv": None, "cd": 0})
+                                  "conf": None, "surv": None, "tv": None, "cd": 0, "miss": 0})
             s["on"].append(d)
             s["peak"] = max(s["peak"], v)
+            s["miss"] = 0
 
         # 2) 段重置：不在榜 且 距上次在榜 > 5 个交易日（用交易日序号差）
         for n, s in st.items():
             if n not in on and s["on"] and i - didx[s["on"][-1]] > 5:
                 st[n] = {"on": [], "seg": d, "peak": -1e18,
-                         "conf": None, "surv": None, "tv": None, "cd": 0}
+                         "conf": None, "surv": None, "tv": None, "cd": 0, "miss": 0}
+
+        # 2.5) 主线退出（V2）：确认板块连续 3 个交易日不在榜 → EXITED + 重置
+        for n, s in st.items():
+            if s["conf"] and n not in on:
+                s["miss"] = s.get("miss", 0) + 1
+                if s["miss"] >= 3:
+                    st[n] = {"on": [], "seg": d, "peak": -1e18,
+                             "conf": None, "surv": None, "tv": None, "cd": 0, "miss": 0}
 
         # 3) 逐板块：存活复核 → cooldown → 确认信号
         for n, v in on.items():
