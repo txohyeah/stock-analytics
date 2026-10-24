@@ -126,7 +126,7 @@ def bulk_fetch(db_path: str | Path | None = None) -> tuple[dict[str, list], dict
         # 最新报告期 vs 去年同期（income 全部分期，取每 code 最新 end_date + 去年同口径）
         trend_map: dict[str, dict[str, Any]] = {}
         all_income = conn.execute(
-            "SELECT ts_code, end_date, ann_date, revenue, n_income_attr_p FROM income"
+            "SELECT ts_code, end_date, ann_date, revenue, n_income, n_income_attr_p FROM income"
         ).fetchall()
         by_period: dict[tuple[str, str], list[sqlite3.Row]] = defaultdict(list)
         for r in all_income:
@@ -140,15 +140,18 @@ def bulk_fetch(db_path: str | Path | None = None) -> tuple[dict[str, list], dict
             prev_row = sorted(prev, key=lambda x: str(x["ann_date"] or ""))[-1] if prev else None
             cur = trend_map.setdefault(
                 code,
-                {"latest_ed": end, "rev": None, "np": None, "prev_ed": prev_ed, "prev_rev": None, "prev_np": None},
+                {"latest_ed": end, "rev": None, "np": None, "ni": None,
+                 "prev_ed": prev_ed, "prev_rev": None, "prev_np": None, "prev_ni": None},
             )
             if end >= str(cur["latest_ed"] or ""):
                 cur["latest_ed"] = end
                 cur["rev"] = latest["revenue"]
                 cur["np"] = latest["n_income_attr_p"]
+                cur["ni"] = latest["n_income"]
                 cur["prev_ed"] = prev_ed
                 cur["prev_rev"] = prev_row["revenue"] if prev_row else None
                 cur["prev_np"] = prev_row["n_income_attr_p"] if prev_row else None
+                cur["prev_ni"] = prev_row["n_income"] if prev_row else None
     except sqlite3.Error as exc:
         raise DatabaseConnectionError(str(exc)) from exc
     finally:
@@ -501,6 +504,46 @@ def _deep_checks(annual: list, trend: dict[str, Any] | None = None, industry: st
         else:
             checks.append({"name": "资产减值计提", "level": GREEN,
                            "detail": f"资产减值损失 {imp_abs/1e8:.2f}亿 占营收 {imp_ratio:.1%}（正常）"})
+
+    # 15. 少数股东损益摆动（横店东磁 2026Q3 案例：少数股东损益从 +3.56 亿摆到 -0.91 亿，
+    #     归母 -8.2% 被缓冲得体面，集团净利总额实际 -31.3%——归母失真须拆净利总额看。
+    #     现有"净利率偏离历史"2 倍红线抓不住这类失真（东磁仅 1.4 倍偏离），故单列。
+    #     仅异常时输出黄（报表失真提示，非财务风险），正常不占位不输出。）
+    def _minority_check(cur_np: Any, cur_ni: Any, prev_np: Any, prev_ni: Any, label: str) -> dict | None:
+        cur_np, cur_ni = _to_float(cur_np), _to_float(cur_ni)
+        prev_np, prev_ni = _to_float(prev_np), _to_float(prev_ni)
+        if cur_np is None or cur_ni is None or prev_np is None or prev_ni is None or cur_np == 0:
+            return None
+        cur_min = cur_ni - cur_np   # 本期少数股东损益
+        prev_min = prev_ni - prev_np
+        swing = abs(cur_min - prev_min)
+        if swing < 0.1 * abs(cur_np):
+            return None  # 小扰动（<归母 10%）不算摆动
+        # A 异向摆动：符号翻转且变动额 ≥ 归母 10%
+        if cur_min * prev_min < 0:
+            return {"name": "少数股东损益摆动", "level": YELLOW,
+                    "detail": f"{label}少数股东损益 {prev_min/1e8:+.2f}亿 → {cur_min/1e8:+.2f}亿 异向摆动（变动 {swing/1e8:.2f}亿 ≥ 归母 10%），归母被少数股东盈亏缓冲，须拆净利总额看真实经营"}
+        # B 增速背离：归母 vs 净利总额同比差 >15pct
+        if prev_np != 0 and prev_ni != 0:
+            np_yoy = (cur_np - prev_np) / abs(prev_np)
+            ni_yoy = (cur_ni - prev_ni) / abs(prev_ni)
+            if abs(np_yoy - ni_yoy) > 0.15:
+                return {"name": "少数股东损益摆动", "level": YELLOW,
+                        "detail": f"{label}归母同比 {np_yoy:+.0%} vs 净利总额同比 {ni_yoy:+.0%}（背离 {abs(np_yoy-ni_yoy)*100:.0f}pct），少数股东损益变动 {swing/1e8:.2f}亿缓冲了归母，须拆净利总额看真实经营"}
+        return None
+
+    _mc = None
+    if trend and trend.get("latest_ed"):
+        _ed = str(trend["latest_ed"])
+        _mc = _minority_check(trend.get("np"), trend.get("ni"),
+                              trend.get("prev_np"), trend.get("prev_ni"),
+                              f"最新报告期({_ed[:4]}-{_ed[4:6]}) ")
+    if _mc is None and len(annual) >= 2:
+        _mc = _minority_check(annual[0].get("n_income_attr_p"), annual[0].get("n_income"),
+                              annual[1].get("n_income_attr_p"), annual[1].get("n_income"),
+                              "最新年报 ")
+    if _mc:
+        checks.append(_mc)
 
     return checks
 
