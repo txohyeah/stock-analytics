@@ -517,14 +517,16 @@ def _deep_checks(annual: list, trend: dict[str, Any] | None = None, industry: st
         cur_min = cur_ni - cur_np   # 本期少数股东损益
         prev_min = prev_ni - prev_np
         swing = abs(cur_min - prev_min)
-        if swing < 0.1 * abs(cur_np):
-            return None  # 小扰动（<归母 10%）不算摆动
-        # A 异向摆动：符号翻转且变动额 ≥ 归母 10%
+        # 双门槛：相对（≥归母 10%）+ 绝对（≥0.5 亿）——2026-10-23 全市场校准：
+        # 仅相对门槛时小基数公司大量误报（归母几千万时几百万摆动即达 10%），触发率 21.4% 不可用
+        if swing < max(0.1 * abs(cur_np), 5e7):
+            return None  # 小扰动不算摆动
+        # A 异向摆动：符号翻转
         if cur_min * prev_min < 0:
             return {"name": "少数股东损益摆动", "level": YELLOW,
-                    "detail": f"{label}少数股东损益 {prev_min/1e8:+.2f}亿 → {cur_min/1e8:+.2f}亿 异向摆动（变动 {swing/1e8:.2f}亿 ≥ 归母 10%），归母被少数股东盈亏缓冲，须拆净利总额看真实经营"}
-        # B 增速背离：归母 vs 净利总额同比差 >15pct
-        if prev_np != 0 and prev_ni != 0:
+                    "detail": f"{label}少数股东损益 {prev_min/1e8:+.2f}亿 → {cur_min/1e8:+.2f}亿 异向摆动（变动 {swing/1e8:.2f}亿 ≥ 归母 10% 且 ≥0.5 亿），归母被少数股东盈亏缓冲，须拆净利总额看真实经营"}
+        # B 增速背离：归母 vs 净利总额同比差 >15pct（双基数 ≥0.5 亿，小基数增速无意义）
+        if prev_np != 0 and prev_ni != 0 and abs(prev_np) >= 5e7 and abs(prev_ni) >= 5e7:
             np_yoy = (cur_np - prev_np) / abs(prev_np)
             ni_yoy = (cur_ni - prev_ni) / abs(prev_ni)
             if abs(np_yoy - ni_yoy) > 0.15:
