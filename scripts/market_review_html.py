@@ -254,8 +254,10 @@ def render_etf_card(result: dict | None) -> str:
                      f"<td class='{cls}'>{H.escape(r['share_text'])}</td></tr>")
         body += "</table></div>"
     if result['watch']:
-        body += "<div class='b'>观察池：" + H.escape('；'.join(
-            f"{r['name']}（{r['ts_code']}）异常放量 {r['ratio20']:.2f}倍" for r in result['watch'])) + "</div>"
+        watch_ab = [r for r in result['watch'] if r.get('abnormal')]
+        if watch_ab:
+            body += "<div class='b'>观察池：" + H.escape('；'.join(
+                f"{r['name']}（{r['ts_code']}）异常放量 {r['ratio20']:.2f}倍" for r in watch_ab)) + "</div>"
     body += "<div class='note'>" + H.escape(result['footnote']) + "</div>"
     return title + body + "</div></section>"
 

@@ -27,17 +27,18 @@ def _missing(message, reason):
 
 
 def _share(con, code, date):
+    # 返回 (日变化率, 展示文本, 份额绝对值亿份)；绝对值供下游趋势图使用
     if not _table_exists(con, "etf_share_daily"):
-        return None, "份额基线积累中（第 0 天）"
+        return None, "份额基线积累中（第 0 天）", None
     rows = con.execute("SELECT trade_date, shares FROM etf_share_daily WHERE ts_code=? AND trade_date<=? AND shares IS NOT NULL ORDER BY trade_date DESC LIMIT 2", (code, date)).fetchall()
     n = con.execute("SELECT COUNT(*) FROM etf_share_daily WHERE ts_code=? AND trade_date<=? AND shares IS NOT NULL", (code, date)).fetchone()[0]
     if len(rows) < 2 or rows[0][0] != date or rows[1][1] <= 0:
-        return None, f"份额基线积累中（第 {n} 天）"
+        return None, f"份额基线积累中（第 {n} 天）", (rows[0][1] / 1e8 if rows and rows[0][1] else None)
     change = rows[0][1] / rows[1][1] - 1
     text = f"{change:+.2%}"
     if abs(change) >= SHARE_CHANGE_THRESHOLD:
         text = f"份额异动 {change:+.2%}（一级申购/赎回嫌疑）"
-    return change, text
+    return change, text, rows[0][1] / 1e8
 
 
 def evaluate(con, date=None) -> dict:
@@ -65,20 +66,25 @@ def evaluate(con, date=None) -> dict:
     for code, name in ETF_SENTINEL_CODES.items():
         rows = con.execute("SELECT trade_date, amount FROM fund_daily WHERE ts_code=? AND trade_date<=? ORDER BY trade_date DESC LIMIT 121", (code, date)).fetchall()
         if not rows or rows[0][0] != date or rows[0][1] is None:
-            _missing(f"DATA_INSUFFICIENT: fund_daily 无 {date} {code} 数据", "NO_DATA")
+            if code in ETF_CORE_CODES:
+                # 核心家族缺数会让共振判断失真，必须报错，不许静默
+                _missing(f"DATA_INSUFFICIENT: fund_daily 无 {date} {code} 数据", "NO_DATA")
+            continue   # 观察池缺数（如 A500 上市前）跳过该只，其余照常出信号
         history = [float(r[1]) for r in rows[1:] if r[1] is not None and math.isfinite(float(r[1])) and r[1] >= 0]
         amount = float(rows[0][1])
         if not history or not math.isfinite(amount) or amount < 0 or np.mean(history[:20]) <= 0:
             _missing(f"DATA_INSUFFICIENT: {code} 无有效历史基线", "BASELINE_MISSING")
         ratio = amount / float(np.mean(history[:20]))
         p90 = float(np.quantile(history, P90_QUANTILE))
-        change, share_text = _share(con, code, date)
+        change, share_text, share_yi = _share(con, code, date)
         items.append(dict(ts_code=code, name=name, amount_yi=amount / AMOUNT_PER_YI,
+                          baseline_yi=float(np.mean(history[:20])) / AMOUNT_PER_YI,
                           ratio20=ratio, p90_120=p90, p90_hit=amount >= p90,
                           abnormal=ratio >= RATIO20_THRESHOLD or amount >= p90,
-                          share_chg=change, share_text=share_text))
+                          share_chg=change, share_yi=share_yi, share_text=share_text))
     core = [r for r in items if r['ts_code'] in ETF_CORE_CODES]
-    watch = [r for r in items if r['ts_code'] in ETF_WATCH_CODES and r['abnormal']]
+    # 观察池返回全量行（各带 abnormal 标记），展示端自行过滤异动——下游同步/画图需要全量
+    watch = [r for r in items if r['ts_code'] in ETF_WATCH_CODES]
     abnormal = [r for r in core if r['abnormal']]
     n = len(abnormal)
     rating = "平静"
@@ -101,7 +107,8 @@ def markdown(result):
              "|代码|简称|成交额亿|20日倍数|P90 标记|份额变化|", "|---|---|---:|---:|---|---|"]
     for r in result['core']:
         lines.append(f"|{r['ts_code']}|{r['name']}|{r['amount_yi']:.2f}|{r['ratio20']:.2f}|{'≥P90' if r['p90_hit'] else '—'}|{r['share_text']}|")
-    lines += ["", "观察池：" + ('；'.join(f"{r['name']}（{r['ts_code']}）异常放量 {r['ratio20']:.2f}倍" for r in result['watch']) or "无异常放量"), "", result['conclusion'], "", FOOTNOTE]
+    watch_ab = [r for r in result['watch'] if r['abnormal']]
+    lines += ["", "观察池：" + ('；'.join(f"{r['name']}（{r['ts_code']}）异常放量 {r['ratio20']:.2f}倍" for r in watch_ab) or "无异常放量"), "", result['conclusion'], "", FOOTNOTE]
     return '\n'.join(lines) + '\n'
 
 
