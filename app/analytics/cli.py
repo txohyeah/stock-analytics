@@ -404,6 +404,13 @@ def add_analytics_subparsers(sub) -> None:
     _db_arg(chart_parser)
     chart_parser.set_defaults(func=_chart, _json=True)
 
+    from .etf_sentinel import run as run_etf_sentinel
+    etf_parser = sub.add_parser("etf-sentinel", help="国家队宽基 ETF 监控")
+    etf_parser.add_argument("--date", help="交易日 YYYYMMDD，默认最新有数据交易日")
+    etf_parser.add_argument("--output", help="Markdown 输出路径")
+    _db_arg(etf_parser)
+    etf_parser.set_defaults(func=run_etf_sentinel, _json=True)
+
     sm_parser = sub.add_parser("smart-money", help="三路聪明钱市场大方向报告（社保/公募/国家队）")
     _db_arg(sm_parser)
     sm_parser.add_argument("--end", required=True, help="报告期 YYYYMMDD，如 20250630")

@@ -239,6 +239,27 @@ def parse_index_lines(lines: list[str]) -> tuple[list[dict], list[str]]:
 
 # ---------- HTML 渲染 ----------
 
+def render_etf_card(result: dict | None) -> str:
+    title = "<section><h2>🛡️ 国家队 ETF 监控</h2><div class='card'>"
+    if not result:
+        return title + "<div class='b mut'>数据不足，暂无法评级</div></div></section>"
+    body = "<div class='b'>" + H.escape(result['conclusion']) + "</div>"
+    if result['rating'] != '平静':
+        body += "<div style='overflow-x:auto'><table><tr><th>代码 / 简称</th><th>成交额亿</th><th>20日倍数</th><th>P90</th><th>份额变化</th></tr>"
+        for r in result['core']:
+            cls = pct_cls(r['share_chg']) if r['share_chg'] is not None else 'mut'
+            body += (f"<tr><td>{H.escape(r['ts_code'] + ' ' + r['name'])}</td>"
+                     f"<td>{r['amount_yi']:.2f}</td><td>{r['ratio20']:.2f}</td>"
+                     f"<td>{'≥P90' if r['p90_hit'] else '—'}</td>"
+                     f"<td class='{cls}'>{H.escape(r['share_text'])}</td></tr>")
+        body += "</table></div>"
+    if result['watch']:
+        body += "<div class='b'>观察池：" + H.escape('；'.join(
+            f"{r['name']}（{r['ts_code']}）异常放量 {r['ratio20']:.2f}倍" for r in result['watch'])) + "</div>"
+    body += "<div class='note'>" + H.escape(result['footnote']) + "</div>"
+    return title + body + "</div></section>"
+
+
 def render(v: dict) -> str:
     c, lc = v["counts"], v["lc"]
     zt_dt = f"｜涨停 {lc['zt']} / 跌停 {lc['dt']}（收盘封板近似）" if lc else ""
@@ -330,6 +351,8 @@ def render(v: dict) -> str:
         f"{H.escape(v['amp_note'])}<br>中期：<b>{H.escape(v['mid_seg'])}</b>，"
         f"MA60 {H.escape(v['slope_zh'])}</div>{state_note}</div>")
     parts.append("</section>")
+
+    parts.append(render_etf_card(v.get("etf_sentinel")))
 
     # —— ⑧画线台账 + ⑨结构参考（2026-10-22 增，market_lines）——
     cur_title, blocks = None, []
@@ -461,7 +484,18 @@ def main() -> int:
 
     con = sqlite3.connect(DB)
     date = args.date or con.execute("SELECT MAX(trade_date) FROM market_state_daily").fetchone()[0]
+    try:
+        from scripts.etf_share_snapshot import snapshot_today
+        snapshot_today(con)
+    except Exception:
+        print("[warn] ETF 份额快照失败，继续复盘", file=sys.stderr)
     v = collect(con, date)
+    try:
+        from app.analytics.etf_sentinel import evaluate
+        v["etf_sentinel"] = evaluate(con, v["date"])
+    except Exception as exc:
+        print(f"[warn] ETF 监控暂不可用：{type(exc).__name__}", file=sys.stderr)
+        v["etf_sentinel"] = None
     con.close()
 
     html = render(v)

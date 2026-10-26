@@ -184,6 +184,20 @@ def upsert_with_source_log(ctx: SyncContext, dataset: Dataset, frame: pd.DataFra
     return affected
 
 
+def sync_etf_daily(ctx: SyncContext, dataset: Dataset, start_date: str, end_date: str,
+                   ts_code: str | None) -> tuple[int, int]:
+    # 延迟导入避免 registry 与 Dataset 循环依赖；统一客户端限流，逐只串行写入。
+    from app.sync.registry import ETF_SENTINEL_CODES
+
+    fetched = affected = 0
+    for code in ([ts_code] if ts_code else list(ETF_SENTINEL_CODES)):
+        frame = ctx.client.query(dataset.api_name, ts_code=code,
+                                 start_date=start_date, end_date=end_date)
+        fetched += len(frame)
+        affected += upsert(ctx, dataset, frame)
+    return fetched, affected
+
+
 def sync_single_call(ctx: SyncContext, dataset: Dataset, start_date: str, end_date: str, ts_code: str | None) -> tuple[int, int]:
     params = dict(dataset.default_params or {})
     if ts_code:
@@ -434,6 +448,7 @@ def sync_fund_holdings(ctx: SyncContext, dataset: Dataset, start_date: str, end_
 
 
 STRATEGIES: dict[str, SyncFunction] = {
+    "etf_daily": sync_etf_daily,
     "basic": sync_single_call,
     "date_range": sync_single_call,
     "trade_date": sync_by_trade_date,

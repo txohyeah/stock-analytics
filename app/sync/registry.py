@@ -3,6 +3,17 @@ from __future__ import annotations
 from app.sync.base import Dataset
 
 
+# 国家队核心家族与观察池，顺序同时用于报告展示。
+ETF_SENTINEL_CODES = {
+    "510300.SH": "华泰柏瑞300", "510330.SH": "华夏300",
+    "510310.SH": "易方达300", "159919.SZ": "嘉实300", "510050.SH": "华夏上证50",
+    "510500.SH": "南方500", "159915.SZ": "易方达创业板",
+    "588000.SH": "华夏科创50", "588080.SH": "易方达科创50",
+    "159338.SZ": "国泰A500", "563360.SH": "华泰柏瑞A500",
+}
+ETF_CORE_CODES = frozenset(tuple(ETF_SENTINEL_CODES)[:5])
+ETF_WATCH_CODES = frozenset(ETF_SENTINEL_CODES) - ETF_CORE_CODES
+
 DATASETS: dict[str, Dataset] = {
     "trade_cal": Dataset("trade_cal", "trade_cal", "trade_cal", ("exchange", "cal_date"), "trade_cal"),
     "stock_basic": Dataset(
@@ -18,6 +29,7 @@ DATASETS: dict[str, Dataset] = {
             "fields": "ts_code,symbol,name,area,industry,fullname,enname,cnspell,market,exchange,curr_type,list_status,list_date,delist_date,is_hs,act_name,act_ent_type",
         },
     ),
+    "fund_daily": Dataset("fund_daily", "fund_daily", "fund_daily", ("ts_code", "trade_date"), "etf_daily"),
     "daily": Dataset("daily", "daily", "daily", ("ts_code", "trade_date"), "trade_date"),
     "daily_basic": Dataset("daily_basic", "daily_basic", "daily_basic", ("ts_code", "trade_date"), "trade_date"),
     "adj_factor": Dataset("adj_factor", "adj_factor", "adj_factor", ("ts_code", "trade_date"), "trade_date"),
@@ -155,6 +167,7 @@ DAILY_ORDER = (
     # moneyflow_ths / kpl_concept_cons：2000 积分档无权限（2026-08-29 实测），暂不纳入定时同步
     # "moneyflow_ths",
     # "kpl_concept_cons",
+    "fund_daily",
 )
 
 FINANCE_ORDER = ("fina_indicator", "income", "balancesheet", "cashflow")
