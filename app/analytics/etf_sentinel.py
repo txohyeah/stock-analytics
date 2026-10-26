@@ -12,7 +12,9 @@ from .errors import DataInsufficientError, UserInputError
 
 RATIO20_THRESHOLD = 3.0
 P90_QUANTILE = 0.90
-CONTEXT_THRESHOLD = 0.5
+CONTEXT_THRESHOLD = 0.5        # 当日大跌/冲高线（用户拍板 ±0.5%）
+DEFENSE_3D = -1.0              # 近 3 日累计 ≤-1% 也算防守语境（防大跌次日修复日误判压盘，20261023 案例）
+OVERHEAT_3D = 1.5              # 压盘需 3 日累计 ≥+1.5%（连涨过热），单日冲高不算
 SHARE_CHANGE_THRESHOLD = 0.01
 AMOUNT_PER_YI = 100000.0  # fund_daily.amount 千元 → 亿元
 FOOTNOTE = "放量≠实锤：场内成交为双边口径，份额与官方公告为更确凿证据"
@@ -61,7 +63,19 @@ def evaluate(con, date=None) -> dict:
     if not idx or idx[0] is None or not math.isfinite(float(idx[0])):
         _missing(f"DATA_INSUFFICIENT: index_daily 无 {date} 上证数据", "NO_DATA")
     pct = float(idx[0])
-    context = "down" if pct <= -CONTEXT_THRESHOLD else "up" if pct >= CONTEXT_THRESHOLD else "flat"
+    # 语境 = 当日 + 近 3 日累计双条件：国家队护盘是连续动作，大跌次日的修复反弹
+    # （3 日累计仍为负）归防守语境，不是压盘；压盘只认"连涨过热 + 当日冲高"。
+    rows3 = con.execute(
+        "SELECT pct_chg FROM index_daily WHERE ts_code='000001.SH' AND trade_date<=? "
+        "ORDER BY trade_date DESC LIMIT 3", (date,)).fetchall()
+    pcts3 = [float(r[0]) for r in rows3 if r[0] is not None and math.isfinite(float(r[0]))]
+    cum3 = sum(pcts3) if pcts3 else pct
+    if pct <= -CONTEXT_THRESHOLD or cum3 <= DEFENSE_3D:
+        context = "down"
+    elif pct >= CONTEXT_THRESHOLD and cum3 >= OVERHEAT_3D:
+        context = "up"
+    else:
+        context = "flat"
     items = []
     for code, name in ETF_SENTINEL_CODES.items():
         rows = con.execute("SELECT trade_date, amount FROM fund_daily WHERE ts_code=? AND trade_date<=? ORDER BY trade_date DESC LIMIT 121", (code, date)).fetchall()
@@ -96,7 +110,7 @@ def evaluate(con, date=None) -> dict:
         else:
             rating = "异常放量"
     basis = '、'.join(f"{r['ts_code']} {r['ratio20']:.2f}倍" for r in abnormal) or "核心家族无异常放量"
-    conclusion = f"{rating}：{basis}；上证 {pct:+.2f}%"
+    conclusion = f"{rating}：{basis}；上证 {pct:+.2f}%（3日累计 {cum3:+.2f}%）"
     return dict(ok=True, date=date, rating=rating, context=context, index_pct=pct,
                 core=core, watch=watch, abnormal_codes=[r['ts_code'] for r in items if r['abnormal']],
                 conclusion=conclusion, footnote=FOOTNOTE)
