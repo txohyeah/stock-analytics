@@ -328,7 +328,8 @@ def fill_sell(con: sqlite3.Connection, scon: sqlite3.Connection, o: dict,
         "UPDATE manual_orders SET status='filled', fill_date=?, fill_price_adj=?, fill_price_raw=?, "
         "fill_shares=?, fill_amount=?, fee=? WHERE id=?",
         (fill_date, price_adj, price_raw, qty, proceeds, fee, o["id"]))
-    print(f"  ✅ 卖出成交 {pos['name']} {pos['ts_code']} {qty}股 × {price_raw:.2f} 元（{fill_date} 收盘）"
+    print(f"  ✅ 卖出成交 {pos['name']} {pos['ts_code']} {qty}股 × {price_raw:.2f} 元"
+          f"（{fill_date} {'盘中' if o.get('exec_type') == 'manual' else '收盘'}）"
           f"｜{ret*100:+.2f}% 盈亏 {pnl:+,.0f} 元（{o.get('reason') or '指令卖出'}，持 {days} 天）"
           + (f"｜剩余 {left} 股继续持有" if left else ""))
 
@@ -639,7 +640,7 @@ def cmd_sell(args) -> int:
         print(f"❌ {name} {code} 无在持仓位")
         return 2
     if not is_trade_date(scon, date):
-        print(f"❌ {date} 非交易日，卖出收盘价单不收")
+        print(f"❌ {date} 非交易日，卖出单不收")
         return 2
     pid = args.position_id
     if pid is None and len(lots) > 1:
@@ -647,13 +648,30 @@ def cmd_sell(args) -> int:
         for p in lots:
             print(f"   id={p['id']} {p['entry_date']}买 {p['shares']}股 成本 {p['entry_price_raw']:.2f}（{p['source']}）")
         return 2
+    exec_type = "manual" if args.price else "close"
+    if args.price:
+        bar = scon.execute(
+            "SELECT low, high FROM daily WHERE ts_code=? AND trade_date=?", (code, date)).fetchone()
+        if bar and bar[0] and bar[1] and not (bar[0] <= args.price <= bar[1]):
+            print(f"❌ 盘中价 {args.price:.2f} 超出 {date} 当日区间 [{bar[0]:.2f}, {bar[1]:.2f}]，拒绝")
+            scon.close()
+            con.close()
+            return 2
     con.execute(
         "INSERT INTO manual_orders (order_date, side, ts_code, name, exec_type, qty, position_id, reason, created_at) "
         "VALUES (?,?,?,?,?,?,?,?,?)",
-        (date, "sell", code, name, "close", args.qty, pid, args.reason or "指令卖出", now_str()))
+        (date, "sell", code, name, exec_type, args.qty, pid, args.reason or "指令卖出", now_str()))
     con.commit()
-    print(f"📝 挂单：卖出 {name} {code} {args.qty or '全部'} 股（收盘价，{date} 下单）")
-    if close_px(scon, code, date):
+    px_desc = f"盘中价 {args.price:.2f}" if args.price else "收盘价"
+    print(f"📝 挂单：卖出 {name} {code} {args.qty or '全部'} 股（{px_desc}，{date} 下单）")
+    if args.price:
+        price_adj = args.price * adj_at(scon, code, date)
+        o = rows_as_dicts(con, con.execute(
+            "SELECT * FROM manual_orders WHERE side='sell' AND status='pending' AND ts_code=? "
+            "AND order_date=? ORDER BY id DESC LIMIT 1", (code, date)))[0]
+        fill_sell(con, scon, o, date, price_adj)
+        con.commit()
+    elif close_px(scon, code, date):
         o = rows_as_dicts(con, con.execute(
             "SELECT * FROM manual_orders WHERE side='sell' AND status='pending' AND ts_code=? "
             "AND order_date=? ORDER BY id DESC LIMIT 1", (code, date)))[0]
@@ -738,10 +756,11 @@ def main() -> int:
     p.add_argument("--source", default="用户自选")
     p.add_argument("--note")
     p.add_argument("--date")
-    p = sub.add_parser("sell", help="挂卖出单（收盘价）")
+    p = sub.add_parser("sell", help="挂卖出单（默认收盘价；--price 按盘中价立即成交）")
     p.add_argument("--code", required=True)
     p.add_argument("--position-id", type=int)
     p.add_argument("--qty", type=int, help="股数，默认全部")
+    p.add_argument("--price", type=float, help="盘中自定义成交价（未复权元），给出则立即按此价成交")
     p.add_argument("--reason", default="指令卖出")
     p.add_argument("--date")
     p = sub.add_parser("cancel", help="撤销挂单")
