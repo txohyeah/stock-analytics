@@ -45,6 +45,44 @@ def _industry_map(conn) -> dict[str, str]:
     return {r[0]: r[1] for r in rows}
 
 
+_WARNING = "⚠️ 数据不完整（覆盖不足50%），以下结论仅供参考"
+
+
+def _previous_quarter(end_date: str) -> str:
+    year = int(end_date[:4])
+    suffix = {"0331": "1231", "0630": "0331", "0930": "0630", "1231": "0930"}[end_date[4:]]
+    return f"{year - (end_date[4:] == '0331'):04d}{suffix}"
+
+
+def _quarter_completeness(conn, end_date: str) -> dict:
+    """Compare distinct funds, not holding rows (each fund owns several stocks)."""
+    def count(date):
+        rows = _query(conn, "SELECT COUNT(DISTINCT fund_code) FROM fund_holdings WHERE end_date = ?", (date,))
+        return rows[0][0] if rows else 0
+
+    current = count(end_date)
+    previous = count(_previous_quarter(end_date))
+    complete = current > 0 and (not previous or current >= previous * 0.5)
+    result = {"fund_count": current, "previous_fund_count": previous,
+              "data_complete": complete, "warnings": [] if complete else [_WARNING],
+              "fallback_end": None}
+    if not complete:
+        # Find the most recent earlier quarter that passes its own coverage gate.
+        quarters = _query(conn, "SELECT DISTINCT end_date FROM fund_holdings WHERE end_date < ? ORDER BY end_date DESC", (end_date,))
+        for (quarter,) in quarters:
+            funds, baseline = count(quarter), count(_previous_quarter(quarter))
+            if funds and (not baseline or funds >= baseline * 0.5):
+                result["fallback_end"] = quarter
+                break
+    return result
+
+
+def _report_completeness(conn, end_date, flow):
+    # Public-fund sections use the requested quarter, even if shareholder data lags.
+    coverage = _quarter_completeness(conn, end_date)
+    return coverage if not coverage["data_complete"] else flow
+
+
 def industry_allocation(conn, end_date: str) -> pd.DataFrame:
     """公募行业配置：fund_holdings 按行业聚合（持仓市值加权）。
 
@@ -144,14 +182,17 @@ def smart_money_flow(conn, end_date: str, prev_date: str | None = None) -> dict:
     avail = _query(conn, "SELECT MAX(end_date) FROM top10_holders")
     avail = avail[0][0] if avail and avail[0][0] else None
     if not avail:
-        return {"industry": pd.DataFrame(), "changes": [], "used_end": None}
+        if prev_date and prev_date >= end_date:
+            raise ValueError("prev_date must be earlier than end_date")
+        return {"industry": pd.DataFrame(), "changes": [], "used_end": None,
+                "used_prev": prev_date, **_quarter_completeness(conn, end_date)}
     if end_date > avail:
         end_date = avail
-    if prev_date and prev_date > avail:
-        # 自动取 avail 的上一季度（与 end_date fallback 对齐）
-        y, m = int(avail[:4]), int(avail[4:6])
-        q_end = {"03": "1231", "06": "0331", "09": "0630", "12": "0930"}
-        prev_date = f"{y - 1 if m == 3 else y}{q_end[avail[4:6]]}"
+        # A downgrade invalidates even an explicitly supplied comparison quarter.
+        prev_date = _previous_quarter(end_date)
+    if prev_date and prev_date >= end_date:
+        raise ValueError("prev_date must be earlier than end_date")
+    coverage = _quarter_completeness(conn, end_date)
 
     latest_date = _query(conn, "SELECT MAX(trade_date) FROM daily")
     latest_date = latest_date[0][0] if latest_date else None
@@ -163,10 +204,17 @@ def smart_money_flow(conn, end_date: str, prev_date: str | None = None) -> dict:
             """
             SELECT h.ts_code, h.holder_name, h.hold_amount AS hold_shares,
                    h.hold_amount * d.close AS hold_amount, h.hold_ratio
-            FROM top10_holders h
+            -- Rank announcement versions before aggregating holdings or changes.
+            FROM (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY ts_code, end_date, holder_name
+                    ORDER BY ann_date DESC
+                ) AS version_rank
+                FROM top10_holders
+            ) h
             JOIN stock_basic s ON h.ts_code = s.ts_code
             LEFT JOIN daily d ON h.ts_code = d.ts_code AND d.trade_date = ?
-            WHERE h.end_date = ? AND s.industry IS NOT NULL
+            WHERE h.end_date = ? AND h.version_rank = 1 AND s.industry IS NOT NULL
             """,
             (latest_date, d),
         )
@@ -178,7 +226,8 @@ def smart_money_flow(conn, end_date: str, prev_date: str | None = None) -> dict:
 
     cur = holders_for(end_date)
     if cur.empty:
-        return {"industry": pd.DataFrame(), "changes": [], "used_end": end_date}
+        return {"industry": pd.DataFrame(), "changes": [], "used_end": end_date,
+                "used_prev": prev_date, **coverage}
 
     # 行业分布
     cur = cur.copy()
@@ -210,12 +259,18 @@ def smart_money_flow(conn, end_date: str, prev_date: str | None = None) -> dict:
                 }
                 for r in moved.itertuples()
             ]
-    return {"industry": ind_df, "changes": changes, "used_end": end_date, "used_prev": prev_date}
+    return {"industry": ind_df, "changes": changes, "used_end": end_date, "used_prev": prev_date, **coverage}
 
 
 def report(conn, end_date: str, prev_date: str | None = None) -> str:
     """季度《聪明钱市场大方向报告》文本输出。"""
+    flow = smart_money_flow(conn, end_date, prev_date)
+    coverage = _report_completeness(conn, end_date, flow)
     lines: list[str] = []
+    if coverage.get("data_complete") is False:
+        lines.append(_WARNING)
+        if coverage.get("fallback_end"):
+            lines.append(f"可改用数据较完整的报告期：{coverage['fallback_end']}")
     lines.append(f"===== 聪明钱市场大方向报告（{end_date}）=====")
     lines.append("（数据口径：公募=主动权益基金前十大重仓股聚合，为近似行业配置，非全仓精确值）")
     lines.append("")
@@ -267,7 +322,6 @@ def report(conn, end_date: str, prev_date: str | None = None) -> str:
         lines.append("")
 
     # 4. 社保/汇金
-    flow = smart_money_flow(conn, end_date, prev_date)
     if not flow["industry"].empty:
         used_end = flow.get("used_end", end_date)
         lines.append(f"【4】社保/汇金/养老金行业分布（直接持股，按市值聚合，单位亿元，报告期 {used_end}）")
@@ -356,6 +410,10 @@ def report_html(conn, end_date: str, prev_date: str | None = None) -> str:
     conc = concentration(conn, end_date)
     chg = top_holdings_change(conn, end_date, prev_date) if prev_date else None
     flow = smart_money_flow(conn, end_date, prev_date)
+    coverage = _report_completeness(conn, end_date, flow)
+    # Add only a warning line; preserve the existing report template layout.
+    warning_html = (f'<div role="alert" class="sm-conclusion"><strong>{_WARNING}</strong></div>'
+                    if coverage.get("data_complete") is False else "")
 
     # 指标卡
     kpi_html = ""
@@ -479,6 +537,7 @@ def report_html(conn, end_date: str, prev_date: str | None = None) -> str:
   </div>
 </header>
 <main class="container">
+  {warning_html}
   <h2>🧠 聪明钱市场大方向报告</h2>
   <div class="sm-note">报告期 {end_date} · 自动生成 · 数据口径：公募=主动权益基金前十大重仓股聚合（近似行业配置，非全仓精确值）</div>
   {kpi_html}

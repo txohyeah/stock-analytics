@@ -413,15 +413,34 @@ def add_analytics_subparsers(sub) -> None:
 
     sm_parser = sub.add_parser("smart-money", help="三路聪明钱市场大方向报告（社保/公募/国家队）")
     _db_arg(sm_parser)
-    sm_parser.add_argument("--end", required=True, help="报告期 YYYYMMDD，如 20250630")
-    sm_parser.add_argument("--prev", help="对比上期 YYYYMMDD，如 20250331（缺省自动取上一季度）")
+    sm_parser.add_argument("--end", required=True, type=_quarter_end, help="报告期 YYYYMMDD，如 20250630")
+    sm_parser.add_argument("--prev", type=_quarter_end, help="对比上期 YYYYMMDD，如 20250331（缺省自动取上一季度）")
     sm_parser.add_argument("--html", help="同时输出 HTML 页面到指定路径（内置模板，无外部依赖）")
-    sm_parser.set_defaults(func=_smart_money)
+    sm_parser.set_defaults(func=_smart_money, _smart_money_parser=sm_parser)
+
+
+def _quarter_end(value: str) -> str:
+    """Reject malformed or non-quarter dates before opening the database."""
+    from datetime import datetime
+    try:
+        if len(value) != 8 or not value.isascii() or not value.isdigit():
+            raise ValueError
+        datetime.strptime(value, "%Y%m%d")
+        if value[4:] not in {"0331", "0630", "0930", "1231"}:
+            raise ValueError
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"{value!r}: expected a valid YYYYMMDD quarter-end date (0331/0630/0930/1231)"
+        ) from None
+    return value
 
 
 def _smart_money(args: argparse.Namespace) -> int:
     from .smart_money import report, report_html
 
+    # Cross-argument validation also works when mounted in the unified CLI.
+    if args.prev and args.prev >= args.end:
+        args._smart_money_parser.error("--prev must be earlier than --end")
     repository = _stock_repository(args.database)
     prev = args.prev
     if not prev:

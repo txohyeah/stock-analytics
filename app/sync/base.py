@@ -376,6 +376,17 @@ def sync_by_period_paged(ctx: SyncContext, dataset: Dataset, start_date: str, en
     return fetched, affected
 
 
+class FundHoldingsSyncResult(tuple):
+    """Keep legacy (fetched rows, affected rows) unpacking; expose coverage separately."""
+
+    def __new__(cls, fetched, affected, **metadata):
+        result = super().__new__(cls, (fetched, affected))
+        result.metadata = metadata
+        for key, value in metadata.items():
+            setattr(result, key, value)
+        return result
+
+
 def sync_fund_holdings(ctx: SyncContext, dataset: Dataset, start_date: str, end_date: str, ts_code: str | None) -> tuple[int, int]:
     """天天基金爬虫：主动权益基金前十大重仓股（市场大方向分析用）。
 
@@ -408,9 +419,9 @@ def sync_fund_holdings(ctx: SyncContext, dataset: Dataset, start_date: str, end_
     has_data = ctx.store.query("SELECT COUNT(*) FROM fund_holdings")[0][0] > 0
     years = 1 if has_data else 2
 
-    # 断点续爬：已有最新季度数据的基金跳过
+    # Resume only the requested quarter: older holdings must not skip new work.
     latest_q = ctx.store.query("SELECT MAX(end_date) FROM fund_holdings")
-    latest_q = latest_q[0][0] if latest_q and latest_q[0][0] else ""
+    latest_q = end_date or (latest_q[0][0] if latest_q and latest_q[0][0] else "")
     done: set[str] = set()
     if latest_q:
         done = {
@@ -424,27 +435,41 @@ def sync_fund_holdings(ctx: SyncContext, dataset: Dataset, start_date: str, end_
     affected = 0
     skipped = 0
     failed: list[str] = []
+    failed_codes: list[str] = []
+    fetched_funds = 0
     for fund_code, fund_name in funds:
         if fund_code.split(".")[0] in done:
             skipped += 1
             continue
         try:
-            frame = fetch_fund_holdings(fund_code, years=years)
-        except Exception as exc:  # noqa: BLE001 - 单只失败不中断，记录后继续
+            # Historical requests must fetch the requested year as well.
+            kwargs = {"years": years}
+            if end_date:
+                kwargs["year"] = int(end_date[:4])
+            frame = fetch_fund_holdings(fund_code, **kwargs)
+            # Bootstrap an empty database from the first available report quarter.
+            if not latest_q and not frame.empty:
+                latest_q = frame["end_date"].max()
+            if frame.empty or (latest_q and not frame["end_date"].eq(latest_q).any()):
+                raise ValueError(f"no holdings for requested quarter {latest_q}")
+            affected += upsert(ctx, dataset, frame)
+        except Exception as exc:  # Single-fund failures leave the quarter incomplete.
+            failed_codes.append(fund_code)
             failed.append(f"{fund_code}: {exc}")
             logger.warning("fund_holdings %s failed: %s", fund_code, exc)
             continue
-        if frame.empty:
-            skipped += 1
-            continue
         fetched += len(frame)
-        affected += upsert(ctx, dataset, frame)
+        fetched_funds += 1
         time.sleep(0.5)  # 限速 2 req/s
         if (fetched + skipped) % 200 == 0:
             logger.info("fund_holdings progress: fetched=%s skipped=%s failed=%s", fetched, skipped, len(failed))
     if failed:
         logger.warning("fund_holdings %d 只失败: %s", len(failed), "; ".join(failed[:10]))
-    return fetched, affected
+    return FundHoldingsSyncResult(
+        fetched, affected, total_funds=len(funds), fetched_funds=fetched_funds,
+        failed_count=len(failed_codes), failed_codes=failed_codes,
+        skipped_funds=skipped, end_date=latest_q, data_complete=not failed_codes,
+    )
 
 
 STRATEGIES: dict[str, SyncFunction] = {
@@ -479,12 +504,16 @@ def run_dataset(ctx: SyncContext, dataset: Dataset, start_date: str, end_date: s
             if dataset.name in {"daily", "adj_factor"} and ctx.ts_codes
             else STRATEGIES[dataset.strategy]
         )
-        fetched, affected = strategy(ctx, dataset, start_date, end_date, ts_code)
+        result = strategy(ctx, dataset, start_date, end_date, ts_code)
+        fetched, affected = result
     except Exception as exc:
         finish_sync_run(ctx.store, run_id, "failed", 0, 0, str(exc))
         raise
-    finish_sync_run(ctx.store, run_id, "success", fetched, affected)
-    return fetched, affected
+    # Persist incomplete coverage instead of recording partial quarters as success.
+    incomplete = getattr(result, "data_complete", True) is False
+    finish_sync_run(ctx.store, run_id, "incomplete" if incomplete else "success", fetched, affected,
+                    str(result.metadata) if incomplete else None)
+    return result
 
 
 def run_many(ctx: SyncContext, datasets: Iterable[Dataset], start_date: str, end_date: str, mode: str, ts_code: str | None = None) -> tuple[dict[str, tuple[int, int]], list[str]]:
@@ -493,8 +522,7 @@ def run_many(ctx: SyncContext, datasets: Iterable[Dataset], start_date: str, end
     failures: list[str] = []
     for dataset in datasets:
         try:
-            fetched, affected = run_dataset(ctx, dataset, start_date, end_date, mode, ts_code)
-            results[dataset.name] = (fetched, affected)
+            results[dataset.name] = run_dataset(ctx, dataset, start_date, end_date, mode, ts_code)
         except Exception as exc:  # noqa: BLE001 - fail-soft per dataset
             logger.error("%s failed: %s", dataset.name, exc)
             failures.append(f"{dataset.name}: {exc}")
