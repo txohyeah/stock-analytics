@@ -88,6 +88,42 @@ def cmd_check_trade_day(args: argparse.Namespace | None = None) -> int:
     return 0
 
 
+def cmd_target_date(args: argparse.Namespace | None = None) -> int:
+    """打印「应处理的最近已收盘交易日」YYYYMMDD（防 2026-10-29 跨日空跑事故）。
+
+    cron 任务里用 $(date +%Y%m%d) 在零点后补跑，目标日会漂移到次日，
+    导致"当日行情未入库"分支静默空跑（任务 exit 0 但零动作）。
+    口径必须与 projects/paper-sim/scripts/sync_daily.py 的 expected_target_date 保持一致：
+    上海时间 15:00 前回退一天 → trade_cal 中 <= cutoff 的最近开市日。
+    """
+    del args
+    import datetime as _dt
+    import sqlite3 as _sq
+
+    tz = _dt.timezone(_dt.timedelta(hours=8))
+    now = _dt.datetime.now(tz)
+    if (now.hour, now.minute) < (15, 0):
+        now -= _dt.timedelta(days=1)
+    cutoff = now.strftime("%Y%m%d")
+    path = get_settings().db_sqlite_path
+    with _sq.connect(f"file:{path}?mode=ro", uri=True) as con:
+        limit = con.execute("SELECT MAX(cal_date) FROM trade_cal").fetchone()[0]
+        target = None
+        if limit and cutoff <= limit:
+            target = con.execute(
+                "SELECT MAX(cal_date) FROM trade_cal WHERE is_open = 1 AND cal_date <= ?",
+                (cutoff,),
+            ).fetchone()[0]
+    if not limit or cutoff > limit:
+        print(f"trade_cal 覆盖不足: cutoff={cutoff}, max={limit}", file=sys.stderr)
+        return 2
+    if not target:
+        print(f"trade_cal 无目标交易日: {cutoff}", file=sys.stderr)
+        return 2
+    print(target)
+    return 0
+
+
 def cmd_sync(args: argparse.Namespace) -> int:
     ctx = build_context(None if args.fallback is None else args.fallback)
     if args.ts_codes:
@@ -173,6 +209,11 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     p_check = sub.add_parser("check-trade-day", help="Print trade-day/non-trade-day for today.")
     p_check.set_defaults(func=cmd_check_trade_day)
+
+    p_target = sub.add_parser(
+        "target-date", help="Print latest closed trading day (YYYYMMDD)."
+    )
+    p_target.set_defaults(func=cmd_target_date)
 
     # A股分析命令（T2）：实现见 app/analytics/cli.py
     from app.analytics.cli import add_analytics_subparsers
