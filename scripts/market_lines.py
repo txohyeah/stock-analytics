@@ -373,8 +373,11 @@ def render_lines_chart(con: sqlite3.Connection, date: str, window: int = 125) ->
 
     # active 手绘线（窗口内逐日取值；斜线只画锚点之后的段，不做外推）
     for ln in active:
+        horizontal = ln["line_type"] == "horizontal" or ln["slope_per_day"] == 0
         ys = [line_value(ln, d, tmap) for d in dates]
-        px = [(k, y) for k, y in enumerate(ys) if y is not None and dates[k] >= ln["p1_date"]]
+        # 水平线=价格水平位全窗口画出；斜线只画锚点之后的段，不做外推
+        px = [(k, y) for k, y in enumerate(ys)
+              if y is not None and (horizontal or dates[k] >= ln["p1_date"])]
         if not px:
             continue
         ax.plot([p[0] for p in px], [p[1] for p in px], color=_TREND, lw=2.0,

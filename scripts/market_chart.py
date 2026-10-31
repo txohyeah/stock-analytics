@@ -4,7 +4,7 @@
 只算数据、不画图：产出 JSON 供 paper-sim 站点与飞书 HTML 共用同一套 canvas 渲染。
 - K 线：上证 000001.SH 最近 window 个交易日（默认 125）
 - 金牛因果通道：复用 tech_indicators.compute_golden_bull_lines(causal=True)，全历史喂、取窗口段
-- 手绘线：逐日取值（斜线只从锚点起，不外推；date<锚点日 → null）
+- 手绘线：逐日取值（水平线=全窗口恒值；斜线=锚点起不外推，锚点日前 → null）
 - MACD：12/26/9 国内口径（柱=2*(DIF-DEA)），与 market_lines._macd_series 同一实现
 
 用法：
@@ -69,11 +69,15 @@ def build_payload(con: sqlite3.Connection, date: str, window: int = WINDOW) -> d
 
     lines = []
     for ln in active:
+        horizontal = ln['line_type'] == 'horizontal' or ln['slope_per_day'] == 0
         ys = []
         for d in dates:
             v = line_value(ln, d, tmap)
-            # 斜线只画锚点之后的段，不外推
-            ys.append(None if (v is None or d < ln['p1_date']) else round(float(v), 2))
+            # 水平线=价格水平位，全窗口恒值；斜线只画锚点之后的段，不外推
+            if horizontal:
+                ys.append(None if v is None else round(float(v), 2))
+            else:
+                ys.append(None if (v is None or d < ln['p1_date']) else round(float(v), 2))
         lines.append({
             'id': ln['id'], 'name': ln['name'], 'kind': ln['kind'],
             'line_type': ln['line_type'], 'p1_date': ln['p1_date'],
