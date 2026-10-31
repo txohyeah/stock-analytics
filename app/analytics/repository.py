@@ -129,7 +129,9 @@ class SqliteRepository:
             with self._connect() as conn:
                 rows = conn.execute(
                     """
-                    SELECT cal_date FROM trade_cal
+                    -- DISTINCT 防呆：trade_cal 含沪深两所各一行，缺它则每交易日重复计数
+                    -- （2026-10-31 周报 trade_days=10、宽度表每日期出现两行）
+                    SELECT DISTINCT cal_date FROM trade_cal
                     WHERE cal_date BETWEEN ? AND ? AND is_open = 1
                     ORDER BY cal_date
                     """,
