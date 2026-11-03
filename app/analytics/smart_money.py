@@ -522,23 +522,27 @@ def report_html(conn, end_date: str, prev_date: str | None = None) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>聪明钱分析报告 · {end_date} · Stocks 研究站</title>
 <link rel="stylesheet" href="/assets/style.css">
-<style>{_HTML_CSS}</style></head><body>
+<style>{_HTML_CSS}</style><link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+<link rel="icon" type="image/png" href="/assets/favicon.png">
+</head><body>
 <header class="top-bar">
-  <div class="brand"><a href="/">📈 Stocks 研究站</a></div>
+  <div class="brand"><a href="/">Stocks 研究站</a></div>
   <nav class="top-nav">
-    <a href="/industries">🏭 产业地图</a>
-    <a href="/articles">📖 文章</a>
-    <a href="/smart-money" class="active">🧠 聪明钱</a>
+    <a href="/industries">产业地图</a>
+    <a href="/articles">文章</a>
+    <a href="/smart-money" class="active">聪明钱</a>
+    <a href="/macro">宏观</a>
+    <a href="/qoq">预增环比</a> <a href="/q3">三季报</a>
   </nav>
   <div class="top-right">
     <span id="who"></span>
-    <button id="theme-btn" class="btn-theme"></button>
+    <button id="theme-btn" class="btn-theme" aria-label="切换深浅主题"></button>
     <button id="logout-btn" class="btn-ghost">退出</button>
   </div>
 </header>
 <main class="container">
   {warning_html}
-  <h2>🧠 聪明钱市场大方向报告</h2>
+  <h2>聪明钱市场大方向报告</h2>
   <div class="sm-note">报告期 {end_date} · 自动生成 · 数据口径：公募=主动权益基金前十大重仓股聚合（近似行业配置，非全仓精确值）</div>
   {kpi_html}
   {ind_html}
