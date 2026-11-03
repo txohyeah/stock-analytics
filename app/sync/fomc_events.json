@@ -24,14 +24,14 @@
       "date": "20261029",
       "time": "02:00",
       "event": "美国:FOMC议息决议(会议10月27-28日)",
-      "value": null,
+      "value": "3.75-4.00%",
       "pre_value": "3.75-4.00%",
       "fore_value": null,
-      "value_num": null,
+      "value_num": 4.0,
       "pre_num": 4.0,
       "fore_num": null,
       "unit": "%",
-      "note": "无点阵图（没有 SEP）；距美国中期选举仅数日，市场定价按兵不动约 64%"
+      "note": "10-2 维持不动（Cook/Hammack 两票反对、主张加息 25bp）；声明经济表述 solid→strong、通胀仍 elevated；无点阵图（没有 SEP）；期货定价 12 月加息概率明显升温，2027 年或再加息 1-2 次"
     },
     {
       "date": "20261210",
