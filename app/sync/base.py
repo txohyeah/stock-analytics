@@ -420,8 +420,20 @@ def sync_fund_holdings(ctx: SyncContext, dataset: Dataset, start_date: str, end_
     years = 1 if has_data else 2
 
     # Resume only the requested quarter: older holdings must not skip new work.
-    latest_q = ctx.store.query("SELECT MAX(end_date) FROM fund_holdings")
-    latest_q = end_date or (latest_q[0][0] if latest_q and latest_q[0][0] else "")
+    # Map the current date to the most recent quarter end (0331/0630/0930/1231)
+    # — codex 修复的 bug fix：原始 end_date 可能是任意日期（如 20261028），需归入季度末。
+    if end_date:
+        _m = int(end_date[4:6])
+        if _m <= 3:
+            end_date = end_date[:4] + "0331"
+        elif _m <= 6:
+            end_date = end_date[:4] + "0630"
+        elif _m <= 9:
+            end_date = end_date[:4] + "0930"
+        else:
+            end_date = end_date[:4] + "1231"
+    latest_q = ctx.store.query("SELECT MAX(end_date) FROM fund_holdings WHERE end_date <= ?", (end_date,))
+    latest_q = latest_q[0][0] if latest_q and latest_q[0][0] else ""
     done: set[str] = set()
     if latest_q:
         done = {
